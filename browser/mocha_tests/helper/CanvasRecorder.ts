@@ -1,0 +1,248 @@
+/* -*- js-indent-level: 8 -*- */
+/*
+ * Copyright the Collabora Online contributors.
+ *
+ * SPDX-License-Identifier: MPL-2.0
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
+interface CanvasRecorderCall {
+	method: string;
+	args: any[];
+	/// Snapshot of canvas state at the moment the call was made. A
+	/// shallow copy of recorder.properties is stored here, so a test
+	/// can ask "what was strokeStyle at this stroke() call?" even
+	/// after later primitives overwrite it.
+	properties: Record<string, any>;
+	/// Save/restore nesting depth at the time of the call. Top-level
+	/// calls are depth 0. The save() call itself is recorded at the
+	/// outer depth, and restore() at the outer depth too. Everything
+	/// in between is at outer+1 (or deeper if nested saves happen).
+	depth: number;
+}
+
+/// A gradient handed out by CanvasRecorder. The stops it was given are
+/// kept in the order they were added, so a test can check where along
+/// the ramp each color was placed.
+class GradientRecorder {
+	public readonly stops: { offset: number; color: string }[] = [];
+
+	constructor(
+		public readonly kind: string,
+		public readonly args: any[],
+	) {}
+
+	addColorStop(offset: number, color: string): void {
+		this.stops.push({ offset: offset, color: color });
+	}
+
+	/// The stops sorted the way the canvas reads them, which is by
+	/// offset regardless of the order they were added in.
+	sortedStops(): { offset: number; color: string }[] {
+		return this.stops.slice().sort((a, b) => a.offset - b.offset);
+	}
+}
+
+/// Test helper that mimics a CanvasRenderingContext2D. Pass an instance of
+/// CanvasRecorder wherever production code expects a context. Every method
+/// invocation is recorded into calls, and every assigned drawing-state
+/// property is recorded into properties.
+///
+/// The properties field holds the live "last set" value of each tracked
+/// canvas property. Save/restore do not pop these back. For an accurate
+/// "what was the state at the time of this call" view, read the
+/// properties field on the call entry returned by findCall/callsOf.
+class CanvasRecorder {
+	public readonly calls: CanvasRecorderCall[] = [];
+	public readonly properties: Record<string, any> = {};
+	public readonly canvas: { width: number; height: number };
+	/// Every gradient handed out, in the order it was created.
+	public readonly gradients: GradientRecorder[] = [];
+	// Uniform scale of the recorded calls, reported by getTransform.
+	private _scale: number = 1;
+	private _scaleStack: number[] = [];
+	private _depth: number = 0;
+
+	private static readonly _PROPS = [
+		'fillStyle',
+		'strokeStyle',
+		'globalAlpha',
+		'lineWidth',
+		'lineCap',
+		'lineJoin',
+		'miterLimit',
+		'font',
+		'textAlign',
+		'textBaseline',
+		'shadowBlur',
+		'shadowColor',
+		'shadowOffsetX',
+		'shadowOffsetY',
+		'globalCompositeOperation',
+		'filter',
+	];
+
+	constructor(width: number = 100, height: number = 100) {
+		this.canvas = { width: width, height: height };
+
+		for (const property of CanvasRecorder._PROPS) {
+			Object.defineProperty(this, property, {
+				get: () => this.properties[property],
+				set: (value) => {
+					this.properties[property] = value;
+				},
+			});
+		}
+	}
+
+	private _record(method: string, args: any[]): void {
+		this.calls.push({
+			method: method,
+			args: args,
+			properties: { ...this.properties },
+			depth: this._depth,
+		});
+	}
+
+	// inspection helpers
+
+	/// First call of the given method, or undefined.
+	findCall(method: string): CanvasRecorderCall | undefined {
+		return this.calls.find((c) => c.method === method);
+	}
+
+	/// All calls of the given method, in order.
+	callsOf(method: string): CanvasRecorderCall[] {
+		return this.calls.filter((c) => c.method === method);
+	}
+
+	/// Total number of times the given method was called.
+	countOf(method: string): number {
+		return this.callsOf(method).length;
+	}
+
+	// canvas context surface
+
+	fillRect(...args: any[]): void {
+		this._record('fillRect', args);
+	}
+	strokeRect(...args: any[]): void {
+		this._record('strokeRect', args);
+	}
+	clearRect(...args: any[]): void {
+		this._record('clearRect', args);
+	}
+	fill(...args: any[]): void {
+		this._record('fill', args);
+	}
+	stroke(...args: any[]): void {
+		this._record('stroke', args);
+	}
+	beginPath(): void {
+		this._record('beginPath', []);
+	}
+	closePath(): void {
+		this._record('closePath', []);
+	}
+	moveTo(...args: any[]): void {
+		this._record('moveTo', args);
+	}
+	lineTo(...args: any[]): void {
+		this._record('lineTo', args);
+	}
+	rect(...args: any[]): void {
+		this._record('rect', args);
+	}
+	arc(...args: any[]): void {
+		this._record('arc', args);
+	}
+	bezierCurveTo(...args: any[]): void {
+		this._record('bezierCurveTo', args);
+	}
+	quadraticCurveTo(...args: any[]): void {
+		this._record('quadraticCurveTo', args);
+	}
+	fillText(...args: any[]): void {
+		this._record('fillText', args);
+	}
+	strokeText(...args: any[]): void {
+		this._record('strokeText', args);
+	}
+	measureText(text: string): TextMetrics {
+		// Deterministic stub. Real canvases measure against the
+		// current font and OS font tables; for tests we just give
+		// each character a fixed advance so assertions can predict
+		// the result.
+		return { width: text.length * 10 } as TextMetrics;
+	}
+	drawImage(...args: any[]): void {
+		this._record('drawImage', args);
+	}
+	clip(...args: any[]): void {
+		this._record('clip', args);
+	}
+	save(): void {
+		// Record at the outer depth, then nest subsequent calls
+		// one level deeper.
+		this._record('save', []);
+		this._scaleStack.push(this._scale);
+		this._depth++;
+	}
+	restore(): void {
+		// Pop the level first so the restore() entry itself sits at
+		// the outer depth, matching the save() entry that opened it.
+		if (this._depth > 0) this._depth--;
+		if (this._scaleStack.length) this._scale = this._scaleStack.pop();
+		this._record('restore', []);
+	}
+	translate(...args: any[]): void {
+		this._record('translate', args);
+	}
+	scale(...args: any[]): void {
+		this._scale *= args[0] ?? 1;
+		this._record('scale', args);
+	}
+
+	/// Only the uniform scale is tracked, the rest comes back as identity.
+	getTransform(): any {
+		return { a: this._scale, b: 0, c: 0, d: this._scale, e: 0, f: 0 };
+	}
+	rotate(...args: any[]): void {
+		this._record('rotate', args);
+	}
+	transform(...args: any[]): void {
+		this._record('transform', args);
+	}
+	setTransform(...args: any[]): void {
+		this._record('setTransform', args);
+	}
+	resetTransform(): void {
+		this._record('resetTransform', []);
+	}
+	setLineDash(...args: any[]): void {
+		this._record('setLineDash', args);
+	}
+	createLinearGradient(...args: any[]): GradientRecorder {
+		return this._makeGradient('linear', args);
+	}
+	createRadialGradient(...args: any[]): GradientRecorder {
+		return this._makeGradient('radial', args);
+	}
+	createPattern(...args: any[]): null {
+		this._record('createPattern', args);
+		return null;
+	}
+
+	private _makeGradient(kind: string, args: any[]): GradientRecorder {
+		this._record(
+			'create' + kind[0].toUpperCase() + kind.slice(1) + 'Gradient',
+			args,
+		);
+		const gradient = new GradientRecorder(kind, args);
+		this.gradients.push(gradient);
+		return gradient;
+	}
+}
