@@ -1,0 +1,107 @@
+/*
+ * OpenBP Docs branding.
+ *
+ * SPDX-License-Identifier: MPL-2.0
+ *
+ * Loaded by coolwsd after the stock stylesheets. Brand colours:
+ *   OpenBP blue  #0094FF (marks, borders)  /  #0077CC (text, ≥4.5:1 on white)
+ *   OpenBP dark  #303030
+ */
+
+/* ---- Colours ---------------------------------------------------------- */
+
+:root {
+	--openbp-blue: #0094FF;
+	--openbp-blue-text: #0077CC;
+	--openbp-dark: #303030;
+
+	--color-primary: #0094FF;
+	--color-primary-text: #fff;
+	--color-primary-dark: #0077CC;
+	--color-primary-darker: #005A9E;
+	--color-primary-lighter: #80CAFF;
+	--color-overlay: #0094FF14;
+	--color-status-linked: #0077CC;
+
+	/* Writer accent; the other apps keep their own colour so the document
+	   type stays recognisable. */
+	--blue1-txt-primary-color: 0, 119, 204;
+}
+
+[data-theme='dark'] {
+	--color-primary: #3AAEFF;
+	--color-primary-text: #0b0b0b;
+	--color-primary-dark: #0094FF;
+	--color-primary-darker: #0077CC;
+	--color-primary-lighter: #1F5E8C;
+	--color-overlay: #3AAEFF14;
+}
+
+[data-doctype='text'] {
+	--doc-type: 0, 119, 204;
+}
+
+[data-theme='dark'] [data-doctype='text'] {
+	--doc-type: 58, 174, 255;
+}
+
+/* ---- Logos ------------------------------------------------------------ */
+
+.document-logo {
+	background: url("images/openbp-logo.svg") no-repeat center !important;
+	background-size: 26px !important;
+}
+
+html[data-theme='dark'] .document-logo {
+	background: url("images/openbp-logo-dark.svg") no-repeat center !important;
+	background-size: 26px !important;
+}
+
+#product-logo {
+	background: url("images/openbp-logo.svg") no-repeat center 8px / 72px !important;
+}
+
+html[data-theme='dark'] #product-logo {
+	background: url("images/openbp-logo-dark.svg") no-repeat center 8px / 72px !important;
+}
+
+/* Loading spinner: the logo above the progress bar. */
+.leaflet-progress-spinner::before {
+	content: "";
+	display: block;
+	position: relative;
+	width: 100%;
+	height: 64px;
+	margin: 0 0 8px;
+	background: url("images/openbp-logo.svg") no-repeat center / 64px;
+	animation: openbp-pulse 1.2s ease-in-out infinite;
+}
+
+html[data-theme='dark'] .leaflet-progress-spinner::before {
+	background-image: url("images/openbp-logo-dark.svg");
+}
+
+.leaflet-progress-spinner-canvas {
+	opacity: 0;
+}
+
+@keyframes openbp-pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.55; }
+}
+
+/* ---- Upstream community links ------------------------------------------ */
+
+/* Help → Forum / Report an issue / Send Feedback point at Collabora's
+   community channels and survey, which are not where OpenBP users get
+   support. Notebookbar ids carry a numeric suffix (forum352), the classic
+   menu uses menu-<id>. */
+#menu-forum,
+#menu-report-an-issue,
+#menu-feedback,
+#help-forum-break,
+#Help-container [id^='forum'],
+#Help-container [id^='report-an-issue'],
+#Help-container [id^='feedback'] {
+	display: none !important;
+}

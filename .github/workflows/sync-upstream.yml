@@ -1,0 +1,137 @@
+# Follow upstream Collabora Online releases.
+#
+# 1. Find the newest upstream release tag (cp-X.Y.Z-N) whose official image is
+#    already published.
+# 2. If it is newer than the `upstream` branch, import a pruned snapshot of it
+#    as one commit on `upstream` (openbp/scripts/snapshot-upstream.sh).
+# 3. If main has not merged `upstream` yet, merge it. A conflict fails the run
+#    (and every following run) until it is resolved by hand:
+#        git fetch origin && git checkout main && git merge origin/upstream
+#        # fix, commit, push - the push builds and publishes the image
+# 4. Build, test and publish the image (build.yml).
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Upstream tag to import, e.g. cp-26.04.5-1 (default: newest release)'
+        type: string
+        required: false
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      merged: ${{ steps.merge.outputs.merged }}
+      ref: ${{ steps.merge.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Pick upstream release
+        id: pick
+        env:
+          REQUESTED: ${{ inputs.tag }}
+        run: |
+          tags=openbp/scripts/upstream-tags.sh
+          current=$(git show origin/upstream:.upstream-version | sed -n 's/^tag=//p')
+          echo "upstream branch is at $current"
+
+          if [ -n "$REQUESTED" ]; then
+            candidates=$REQUESTED
+          else
+            # newest first; only consider tags newer than what we have
+            candidates=$($tags list | tac)
+          fi
+
+          target=
+          for t in $candidates; do
+            $tags newer "$t" "$current" || break
+            base=$($tags base-image "$t")
+            if docker buildx imagetools inspect "$base" > /dev/null 2>&1; then
+              target=$t
+              break
+            fi
+            echo "::notice::$t: official image $base not published yet, skipping"
+          done
+
+          if [ -n "$REQUESTED" ] && [ -z "$target" ]; then
+            echo "::error::Requested $REQUESTED is not newer than $current or its official image is missing"
+            exit 1
+          fi
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "Upstream branch: $current; importing: ${target:-nothing}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Import snapshot into the upstream branch
+        if: steps.pick.outputs.target != ''
+        env:
+          TAG: ${{ steps.pick.outputs.target }}
+        run: |
+          . openbp/upstream.conf
+          wt="$RUNNER_TEMP/upstream"
+          git worktree add -B upstream "$wt" origin/upstream
+          openbp/scripts/snapshot-upstream.sh "$TAG" "$wt"
+          git -C "$wt" add -A
+          git -C "$wt" commit -q -m "Import upstream $TAG" \
+            -m "Pruned snapshot of $UPSTREAM_URL tag $TAG (see openbp/snapshot.sparse)."
+          git -C "$wt" push origin upstream
+          git fetch -q origin upstream
+
+      - name: Merge upstream into main
+        id: merge
+        run: |
+          main_tag=$(sed -n 's/^tag=//p' .upstream-version)
+          up_tag=$(git show origin/upstream:.upstream-version | sed -n 's/^tag=//p')
+          if git merge-base --is-ancestor origin/upstream HEAD; then
+            echo "main already contains upstream $up_tag"
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git merge --no-ff --no-edit -m "Merge upstream $up_tag" origin/upstream; then
+            echo "::error::Merging upstream $up_tag into main (at $main_tag) conflicts in:"
+            git diff --name-only --diff-filter=U | sed 's/^/::error::  /'
+            {
+              echo "### Merge conflict"
+              echo "Resolve by hand:"
+              echo '```'
+              echo "git fetch origin && git checkout main && git merge origin/upstream"
+              echo '```'
+              echo "Conflicting files:"
+              git diff --name-only --diff-filter=U | sed 's/^/- /'
+            } >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort
+            exit 1
+          fi
+          git push origin HEAD:main
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+          echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Merged upstream $up_tag into main" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.merged == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.sync.outputs.ref }}
+    permissions:
+      contents: read
+      packages: write
