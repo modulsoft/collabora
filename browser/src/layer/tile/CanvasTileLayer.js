@@ -3,7 +3,7 @@
  * window.L.CanvasTileLayer is a layer with canvas based rendering.
  */
 
-/* global app JSDialog CanvasSectionContainer GraphicSelection CanvasOverlay CursorHeaderSection $ _ CPolyUtil CPolygon Cursor UNOKey cool OtherViewCellCursorSection RenderManager SplitSection TextSelections CellSelectionMarkers URLPopUpSection CalcValidityDropDown DocumentBase CellCursorSection FormFieldButton TextCursorSection CStyleData CSelections CReferences OtherViewGraphicSelectionSection CompareChangesLabelSection AnimatedGifManager */
+/* global app JSDialog CanvasSectionContainer GraphicSelection CanvasOverlay CursorHeaderSection $ _ CPolyUtil CPolygon Cursor UNOKey cool OtherViewCellCursorSection RenderManager SplitSection TextSelections CellSelectionMarkers URLPopUpSection CalcValidityDropDown DocumentBase CellCursorSection FormFieldButton TextCursorSection CStyleData CSelections CReferences OtherViewGraphicSelectionSection CompareChangesLabelSection AnimatedGifManager ViewState RenderGeometrySection */
 
 function clamp(num, min, max)
 {
@@ -284,6 +284,8 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		// Position and size of the selection start (as if there would be a cursor caret there).
 
 		this._lastValidPart = -1;
+		// Parts picked by scrolling in the stacked view, until the server confirms them.
+		this._scrollPickedParts = [];
 		// Cursor marker
 		this._cursorMarker = null;
 
@@ -360,6 +362,11 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		// rendering is enabled. The tile grid stays empty in this mode.
 		if (RenderManager.isVectorRendering()) {
 			app.sectionContainer.addSection(new cool.VectorContentSection());
+
+			// The geometry the client holds answers what lies under the mouse, so
+			// the pointer is worked out here. The engine keeps reporting its own,
+			// since the hand over a hyperlink is known to it alone.
+			app.sectionContainer.addSection(new RenderGeometrySection());
 		}
 
 		this._canvasOverlay = new CanvasOverlay(this._map, app.sectionContainer.getContext());
@@ -385,7 +392,9 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		}
 
 		// Add it regardless of the file type.
-		app.sectionContainer.addSection(new app.definitions.CommentSection());
+		if (!window.mode.isInteractivePreview()) {
+			app.sectionContainer.addSection(new app.definitions.CommentSection());
+		}
 
 		document.addEventListener('blur', this._onDocumentBlur.bind(this));
 		document.addEventListener('focus', this._onDocumentFocus.bind(this));
@@ -636,6 +645,9 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		if (textMsg.startsWith('tile:') || textMsg.startsWith('delta:')) {
 			RenderManager.onTileMsg(textMsg, img);
 		}
+		else if (textMsg.startsWith('tilegone:')) {
+			RenderManager.onTileGoneMsg(textMsg);
+		}
 		else if (textMsg.startsWith('commandvalues:')) {
 			this._onCommandValuesMsg(textMsg);
 		}
@@ -702,6 +714,10 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		}
 		else if (textMsg.startsWith('statechanged:')) {
 			this._onStateChangedMsg(textMsg);
+		}
+		else if (textMsg.startsWith('viewposition:')) {
+			if (this._viewState)
+				this._viewState.onViewPositionMsg(textMsg);
 		}
 		else if (textMsg.startsWith('status:') || textMsg.startsWith('statusupdate:')) {
 			this._onStatusMsg(textMsg);
@@ -773,10 +789,6 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 				else // Or use previous method.
 					this._map._clip._execCopyCutPaste('copy');
 			}
-		}
-		else if (textMsg.startsWith('clipboardmimetypes:')) {
-			if (window.ThisIsTheQtApp)
-				window.postMobileMessage('CLIPBOARDMIMETYPES' + textMsg.substr(19));
 		}
 		else if (textMsg.startsWith('textselectionend:')) {
 			this._onTextSelectionEndMsg(textMsg);
@@ -966,16 +978,25 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		}
 		else if (textMsg.startsWith('comment:')) {
 			var obj = JSON.parse(textMsg.substring('comment:'.length + 1));
-			app.sectionContainer.getSectionWithName(app.CSections.CommentList.name).onACKComment(obj);
+			let section = app.sectionContainer.getSectionWithName(app.CSections.CommentList.name);
+			if (section) {
+				section.onACKComment(obj);
+			}
 			this._map.fire('comment', obj);
 		}
 		else if (textMsg.startsWith('redlinetablemodified:')) {
 			obj = JSON.parse(textMsg.substring('redlinetablemodified:'.length + 1));
-			app.sectionContainer.getSectionWithName(app.CSections.CommentList.name).onACKComment(obj);
+			let section = app.sectionContainer.getSectionWithName(app.CSections.CommentList.name);
+			if (section) {
+				section.onACKComment(obj);
+			}
 		}
 		else if (textMsg.startsWith('redlinetablechanged:')) {
 			obj = JSON.parse(textMsg.substring('redlinetablechanged:'.length + 1));
-			app.sectionContainer.getSectionWithName(app.CSections.CommentList.name).onACKComment(obj);
+			let section = app.sectionContainer.getSectionWithName(app.CSections.CommentList.name);
+			if (section) {
+				section.onACKComment(obj);
+			}
 		}
 		else if (textMsg.startsWith('applicationbackgroundcolor:')) {
 			app.sectionContainer.setClearColor('#' + textMsg.substring('applicationbackgroundcolor:'.length + 1).trim());
@@ -1017,7 +1038,12 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 						parseInt(obj.start),
 						parseInt(obj.end),
 						listPrefixLength,
-						parseInt(obj.force) > 0);
+						parseInt(obj.force) > 0,
+						obj.before,
+						obj.after,
+						obj.beforeRects,
+						obj.afterRects,
+						obj.headingLevel);
 				}
 			}
 			else if (textMsg.startsWith('a11ycaretchanged:')) {
@@ -1053,7 +1079,8 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			else if (textMsg.startsWith('a11yfocusedparagraph:')) {
 				obj = JSON.parse(textMsg.substring('a11yfocusedparagraph:'.length + 1));
 				this._map._textInput.setA11yFocusedParagraph(
-					obj.content, parseInt(obj.position), parseInt(obj.start), parseInt(obj.end));
+					obj.content, parseInt(obj.position), parseInt(obj.start), parseInt(obj.end),
+					obj.before, obj.after, obj.beforeRects, obj.afterRects, obj.headingLevel);
 			}
 			else if (textMsg.startsWith('a11ycaretposition:')) {
 				var pos = textMsg.substring('a11ycaretposition:'.length + 1);
@@ -1200,11 +1227,13 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			// rectangle (width covers everything) has no pushed delta and
 			// may be a structural change, so drop the cached part and
 			// re-fetch it in full. Without a part, drop every part. The
-			// vector cache is keyed by part index.
+			// part is named by its identifier here, which is a page guid,
+			// so an empty one is what stands for no part at all. The
+			// vector cache is keyed by part index and mode.
 			if (!command.part)
 				RenderManager.clearAllParts();
 			else if (command.width === Number.MAX_SAFE_INTEGER && partIndex >= 0)
-				RenderManager.clearCachedPart(partIndex);
+				RenderManager.clearCachedPart(partIndex, command.mode);
 
 			const topLeftTwips = new cool.Point(command.x, command.y);
 			const offset = new cool.Point(command.width, command.height);
@@ -1301,6 +1330,10 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		else if (obj.commandName === '.uno:CellCursor') {
 			this._onCellCursorMsg(obj.commandValues);
 		}
+		else if (obj.commandName === '.uno:Headings') {
+			if (this._map._textInput.setA11yHeadings)
+				this._map._textInput.setA11yHeadings(obj.commandValues);
+		}
 		else if (this._map.unoToolbarCommands.indexOf(obj.commandName) !== -1) {
 			this._toolbarCommandValues[obj.commandName] = obj.commandValues;
 			this._map.fire('updatetoolbarcommandvalues', {
@@ -1319,8 +1352,9 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 	_onCellAddressMsg: function (textMsg) {
 		// When the user moves the focus to a different cell, a 'cellformula'
 		// message is received from coolwsd, *then* a 'celladdress' message.
+		// It can come first, e.g. with a whole row selected on load, before any cell text.
 		var address = textMsg.substring(13);
-		if (this._map._clip && !this._map['wopi'].DisableCopy) {
+		if (this._map._clip && !this._map['wopi'].DisableCopy && this._lastFormula !== undefined) {
 			this._map._clip.setTextSelectionText(this._lastFormula);
 		}
 		this._map.fire('celladdress', {address: address});
@@ -1677,6 +1711,12 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		textMsg = textMsg.substring(14); // "mousepointer: "
 		textMsg = Cursor.getCustomCursor(textMsg) || textMsg;
 		this._coreMousePointer = textMsg;
+
+		// While the shapes answer for the pointer theirs is the one on screen, apart
+		// from the hand over a hyperlink, which only the engine can tell.
+		if (RenderGeometrySection.answersPointer() && textMsg !== 'pointer')
+			return;
+
 		const canvas = document.getElementById('document-canvas');
 		if (canvas && canvas.style.cursor !== textMsg) {
 			canvas.style.cursor = textMsg;
@@ -2138,7 +2178,7 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			// A command may only carry 'enabled' flag (.uno:DatabaseSettings).
 			if (json.commandName && (json.state !== undefined || json.enabled !== undefined)) {
 				this._map.fire('commandstatechanged', json);
-				if (window.ThisIsTheMacOSApp || window.ThisIsTheQtApp) {
+				if (window.ThisIsTheMacOSApp || window.ThisIsTheQtApp || window.ThisIsTheWindowsApp) {
 					window.postMobileMessage('COMMANDSTATECHANGED ' + JSON.stringify(json));
 				}
 			}
@@ -2160,7 +2200,7 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			var state = index !== -1 ? textMsg.substr(index + 1) : '';
 			const json = {commandName : commandName, state : state};
 			this._map.fire('commandstatechanged', json);
-			if (window.ThisIsTheMacOSApp || window.ThisIsTheQtApp) {
+			if (window.ThisIsTheMacOSApp || window.ThisIsTheQtApp || window.ThisIsTheWindowsApp) {
 				window.postMobileMessage('COMMANDSTATECHANGED ' + JSON.stringify(json));
 			}
 		}
@@ -2178,9 +2218,16 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			success = false;
 		}
 
-		this._map.hideBusy();
+		// A presentation cleanup run reports every step of itself through this message, and
+		// none of those steps is the answer to a command the user is waiting on. So the busy
+		// overlay stays as it is, and the steps are kept off the COMMANDRESULT bridge to the
+		// native shells as well, which carries the answers to the commands a shell sent.
+		const isCleanupEvent = commandName === '.uno:PresentationCleanup';
+
+		if (!isCleanupEvent)
+			this._map.hideBusy();
 		this._map.fire('commandresult', {commandName: commandName, success: success, result: obj.result});
-		if (window.ThisIsTheMacOSApp || window.ThisIsTheQtApp) {
+		if (!isCleanupEvent && window.ThisIsTheMacOSApp) {
 			window.postMobileMessage('COMMANDRESULT ' + textMsg);
 		}
 
@@ -2764,7 +2811,7 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		if (type === 'buttondown')
 			this._clearSearchResults();
 
-		if (this._map && this._map._docLayer && (type === 'buttondown' || type === 'buttonup'))
+		if (this._map && this._map._docLayer && (type === 'buttondown' || type === 'buttonup') && !window.mode.isInteractivePreview())
 			this._map.userList.followUser(this._map._docLayer._getViewId(), false);
 	},
 
@@ -3301,7 +3348,11 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		if (this.isWriter())
 			return 13; /* 170% */
 
-		window.app.console.error('_getMaxZoom should only be called for Impress or Writer.');
+		if (!window.mode.isInteractivePreview()) {
+			// In the interactive preview it is called to set the proper size for Draw
+			// as well.
+			window.app.console.error('_getMaxZoom should only be called for Impress or Writer.');
+		}
 		return 10; /* failsafe 100% */
 	},
 
@@ -3880,9 +3931,11 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 	},
 
 	setInitialZoom: function (map) {
-		if (this.isWriter()) {
+		// We want dynamic zoom (smartZoom) in interactive preview (except calc).
+		const wantDynamicZoom = window.mode.isInteractivePreview() && !this.isCalc();
+		if (wantDynamicZoom || this.isWriter()) {
 			let zoom;
-			const smartZoomEnabled = window.prefs.get('smartZoom') != 'false';
+			const smartZoomEnabled = window.prefs.get('smartZoom') != 'false' || wantDynamicZoom;
 			const maxZoom = this._getMaxZoom();
 
 			if (smartZoomEnabled) {
@@ -3926,6 +3979,9 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		// Plays animated GIFs over the document.
 		if (!this._animatedGifManager)
 			this._animatedGifManager = new AnimatedGifManager(map);
+
+		if (!this._viewState)
+			this._viewState = new ViewState(map);
 
 		/*
 			Because of special handling of delete and backspace chars, we need to know which Writer form is focused.
@@ -4216,6 +4272,7 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			var partToSelect = this._getMostVisiblePart(queue);
 			if (this._selectedPart !== partToSelect) {
 				this._selectedPart = partToSelect;
+				this._scrollPickedParts.push(this.getSelectedPart());
 				app.socket.sendMessage('setclientpart part=' + this.getSelectedPart());
 				this._map.fire('setpart', {
 					selectedPart: this._selectedPart,

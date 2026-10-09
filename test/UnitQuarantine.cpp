@@ -24,7 +24,9 @@
 #include <wsd/DocumentBroker.hpp>
 #include <wsd/Process.hpp>
 
+#include <Poco/File.h>
 #include <Poco/Net/HTTPRequest.h>
+#include <Poco/Path.h>
 #include <csignal>
 #include <ctime>
 
@@ -229,7 +231,7 @@ public:
         LOK_ASSERT_EQUAL_MESSAGE("Unexpected contents in storage", std::string(OriginalDocContent),
                                  getFileContent());
 
-        const std::string documentUrl = Uri::encode(helpers::getTestServerURI() + "/wopi/files/0");
+        const std::string documentUrl = Uri::encode(getWopiHostURI() + "/wopi/files/0");
         const std::string quarantinePath = _quarantinePath + '/' + documentUrl;
         const std::vector<std::string> files = getQuarantineFiles(testname, quarantinePath);
         LOK_ASSERT_MESSAGE("Expected 1 quaratined files in [" << quarantinePath << ']',
@@ -368,7 +370,7 @@ public:
         TST_LOG("Testing with dockey [" << docKey << "] closed.");
         LOK_ASSERT_STATE(_phase, Phase::Unload);
 
-        const std::string documentUrl = Uri::encode(helpers::getTestServerURI() + "/wopi/files/0");
+        const std::string documentUrl = Uri::encode(getWopiHostURI() + "/wopi/files/0");
         const std::string quarantinePath = _quarantinePath + '/' + documentUrl;
         const std::vector<std::string> files = getQuarantineFiles(testname, quarantinePath);
         LOK_ASSERT_MESSAGE("Expected 1 quaratined files in [" << quarantinePath << ']',

@@ -94,6 +94,8 @@ window.L.Control.NotebookbarCalc = window.L.Control.NotebookbarWriter.extend({
 				'context': 'Chart|Series|ErrorBar|Axis|Grid|ChartElements|Trendline|ChartTitle|ChartLegend|ChartLabel',
 				'accessibility': { focusBack: true,	combination: 'CH', de: null }
 			},
+			app.LOUtil.isAIAssistantAvailable(this.map)
+				? JSDialog.AIAssistantTab.getEntry() : null,
 			{
 				'id': 'View-tab-label',
 				'text': _('View'),
@@ -144,6 +146,7 @@ window.L.Control.NotebookbarCalc = window.L.Control.NotebookbarWriter.extend({
 			this.getShapeTab(),
 			this.getPictureTab(),
 			this.getChartTab(),
+			this.getAIAssistantTab(),
 			this.getViewTab(),
 			this.getSparklineTab(),
 			this.getCalcTableTab(),
@@ -160,7 +163,7 @@ window.L.Control.NotebookbarCalc = window.L.Control.NotebookbarWriter.extend({
 
 	getFileTab: function() {
 		var content = [];
-		var hasSave = !this.map['wopi'].HideSaveOption;
+		var hasSave = !this.map['wopi'].HideSaveOption && !this.map.isReadOnlyMode();
 		var hasSaveAs = !this.map['wopi'].UserCanNotWriteRelative;
 		var hasShare = this.map['wopi'].EnableShare;
 		var hasRevisionHistory = window.L.Params.revHistoryEnabled;
@@ -1707,6 +1710,7 @@ window.L.Control.NotebookbarCalc = window.L.Control.NotebookbarWriter.extend({
 				'id':'invertbackground',
 				'class': 'unoinvertbackground',
 				'type': 'bigcustomtoolitem',
+				'visible': window.prefs.getBoolean('darkTheme'),
 				'text': _('Invert Background'),
 				'accessibility': { focusBack: true, combination: 'BG', de: null }
 			},
@@ -1725,16 +1729,6 @@ window.L.Control.NotebookbarCalc = window.L.Control.NotebookbarWriter.extend({
 				'command': '.uno:Navigator',
 				'accessibility': { focusBack: true,	combination: 'NV', de: null }
 			},
-			app.LOUtil.isAIAssistantAvailable(this.map) ? {
-				'id': 'view-ai-sidebar',
-				'type': 'bigcustomtoolitem',
-				'text': _('AI Assistant'),
-				'tooltip': _('AI Assistant'),
-				'icon': 'lc_ai_sidebar.svg',
-				'command': 'aichat',
-				'accessibility': { focusBack: true, combination: 'AI', de: null }
-			} : {},
-
 		];
 
 		return this.getTabPage('View', content);
@@ -2378,7 +2372,7 @@ window.L.Control.NotebookbarCalc = window.L.Control.NotebookbarWriter.extend({
 						'type': 'toolbox',
 						'children': [
 							{
-								'id': 'formula-calculate',
+								'id': 'formula-calculate:CalculateMenu',
 								'type': 'menubutton',
 								'text': _UNO('.uno:Calculate', 'spreadsheet'),
 								'noLabel': true,
@@ -3638,9 +3632,11 @@ window.L.Control.NotebookbarCalc = window.L.Control.NotebookbarWriter.extend({
 			},
 			{ type: 'separator', id: 'picture-leavegroup-break', orientation: 'vertical' },
 			{
+				'id': 'picture-crop',
 				'type': 'bigtoolitem',
 				'text': _UNO('.uno:Crop'),
 				'command': '.uno:Crop',
+				'accessibility': { focusBack: true, combination: 'CR', de: null },
 				'context': 'Graphic'
 			},
 		];

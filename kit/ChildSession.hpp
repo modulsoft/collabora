@@ -20,6 +20,9 @@
 #include <chrono>
 #include <optional>
 #include <queue>
+#include <string>
+#include <string_view>
+#include <vector>
 
 class Document;
 class ChildSession;
@@ -193,6 +196,8 @@ public:
     void downloadAsInForeground();
 
 private:
+    /// Parses the "load" command as coolwsd writes it for the kit.
+    void parseLoadCommand(const StringVector& tokens, std::string& part);
     bool loadDocument(const StringVector& tokens);
     bool saveDocumentBackground(const StringVector &tokens);
 
@@ -201,6 +206,9 @@ private:
     bool clientZoom(const StringVector& tokens);
     bool clientVisibleArea(const StringVector& tokens);
     bool outlineState(const StringVector& tokens);
+
+    /// Says whether this client wants to be told the mouse pointer the document asks for.
+    bool reportMousePointer(const StringVector& tokens);
     bool downloadAs(const StringVector& tokens);
     /// Whether core will put a question to the person while writing the document out in
     /// this format.
@@ -267,6 +275,20 @@ private:
     /// newline-terminated name header followed by the compressed bytes.
     /// Returns false if the data could not be compressed and sent.
     bool sendZstdFrame(std::string_view headerName, const char* data, size_t size);
+
+public:
+    /// The frame a zstd-compressed payload travels in: the header name, then the compressed
+    /// bytes. Empty when the compression failed.
+    static std::vector<char> zstdFrame(std::string_view headerName, const char* data, size_t size);
+
+    /// True once this client has asked for vector primitives.
+    bool isVectorRendering() const { return _isVectorRendering; }
+
+    /// Sends a vector primitives delta: the compressed frame when there is one, otherwise the
+    /// payload as a command values text frame.
+    void sendVectorDelta(const std::vector<char>& frame, const std::string& payload);
+
+private:
     bool askSignatureStatus(const char* buffer, int length, const StringVector& tokens);
     bool renderShapeSelection(const StringVector& tokens);
     bool removeTextContext(const StringVector& tokens);
@@ -338,6 +360,7 @@ public:
             << "\n\tcanonicalViewId: " << _canonicalViewId
             << "\n\tisDocLoaded: " << _isDocLoaded
             << "\n\tisDocPasswordToModifyEntered: " << _isDocPasswordToModifyEntered
+            << "\n\tisVectorRendering: " << _isVectorRendering
             << "\n\tdocType: " << _docType
             << "\n\tcopyingToClipboard: " << _copyToClipboard
             << "\n\tdocType: " << _docType
@@ -382,6 +405,10 @@ private:
 
     /// Whether this view has entered the correct password to modify the document
     bool _isDocPasswordToModifyEntered;
+
+    /// True once this client has asked for vector primitives. Such a client draws the document
+    /// from them rather than from bitmap tiles.
+    bool _isVectorRendering = false;
 
     std::string _docType;
 

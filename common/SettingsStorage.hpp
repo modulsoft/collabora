@@ -31,13 +31,21 @@ namespace Desktop
     Poco::Path getConfigPath();
     std::string getDataDir();
 
-    void uploadSettings(const std::string& payload);
+    // Stores one settings file the Options dialog has uploaded. Returns whether
+    // it belongs to the xcu group, the one the engine reads, so the caller knows
+    // whether there is anything to apply to the open documents.
+    bool uploadSettings(const std::string& payload);
 
     FileResult fetchSettingsFile(const std::string& relPath);
 
     std::string fetchSettingsConfig();
 
     void syncSettings(const std::function<void(const std::vector<char>&)>& sendFileCallback);
+
+    // The configuration the engine reads: the directory the dialog writes its
+    // groups into, in the user's own profile. An app has no jail, so nothing
+    // is staged anywhere and the engine is pointed straight at it.
+    Poco::Path getUserConfigRoot();
 
     // Native-owned per-user UI preferences (preferences.json in the config dir).
     // getDarkMode() returns nullopt when the user has not chosen yet.

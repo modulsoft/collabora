@@ -31,10 +31,11 @@
 #include <common/NumUtil.hpp>
 #include <common/Log.hpp>
 #include <common/Protocol.hpp>
+#include <common/ServerPrivateInfo.hpp>
 #include <common/Session.hpp>
+#include <common/SettingsSecrets.hpp>
 #include <common/TraceEvent.hpp>
 #include <common/Util.hpp>
-#include <common/ViewSettings.hpp>
 #include <net/HttpHelper.hpp>
 #include <net/HttpServer.hpp>
 #include <wsd/wopi/StorageConnectionManager.hpp>
@@ -48,10 +49,12 @@
 
 #include <common/base64.hpp>
 
+#include <Poco/File.h>
 #include <Poco/JSON/Array.h>
 #include <Poco/JSON/Parser.h>
 #include <Poco/MemoryStream.h>
 #include <Poco/Net/HTTPResponse.h>
+#include <Poco/Path.h>
 #include <Poco/StreamCopier.h>
 #include <Poco/Timestamp.h>
 #include <Poco/URI.h>
@@ -86,8 +89,8 @@ using Poco::Path;
 
 // rotates regularly
 const int ClipboardTokenLengthBytes = 16;
-// One-time token authorizing a POST to /cool/relateddocument, rotated per use.
-const int RelatedDocumentTokenLengthBytes = 32;
+// One-time token authorizing a POST to /cool/links, rotated per use.
+const int LinkTokenLengthBytes = 32;
 // home-use, disabled by default.
 const int ProxyAccessTokenLengthBytes = 32;
 
@@ -132,6 +135,7 @@ ClientSession::ClientSession(const std::shared_ptr<ProtocolHandlerInterface>& ws
     , _tileWidthTwips(0)
     , _tileHeightTwips(0)
     , _clientZoomPercent(0)
+    , _restoredLastViewPosition(false)
     , _kitViewId(-1)
     , _canonicalViewId(CanonicalViewId::None)
     , _state(SessionState::DETACHED)
@@ -257,16 +261,16 @@ void ClientSession::rotateClipboardKey(bool notifyClient)
         sendTextFrame("clipboardkey: " + _clipboardKeys[0]);
 }
 
-void ClientSession::rotateRelatedDocumentToken(bool notifyClient)
+void ClientSession::rotateLinkToken(bool notifyClient)
 {
     if (_state == SessionState::WAIT_DISCONNECT)
         return;
 
     // A fresh hard-to-guess token. The previous one, if any, stops being
     // accepted, so an accepted POST cannot be replayed.
-    _relatedDocumentToken = Util::rng::getHexString(RelatedDocumentTokenLengthBytes);
+    _linkToken = Util::rng::getHexString(LinkTokenLengthBytes);
     if (notifyClient)
-        sendTextFrame("relateddocumenttoken: " + _relatedDocumentToken);
+        sendTextFrame("linktoken: " + _linkToken);
 }
 
 std::string ClientSession::getClipboardURI(bool encode)
@@ -503,7 +507,10 @@ void ClientSession::handleClipboardRequest(DocumentBroker::ClipboardRequest     
                         LOG_ERR("Malformed clipboard download URL [" << url << ']');
                         pathAndQuery.clear();
                     }
-                    if (pathAndQuery.find("/cool/clipboard") != std::string::npos)
+                    // Any service_root may come before it, so only the end of the path is fixed.
+                    const std::string_view clipPath =
+                        std::string_view(pathAndQuery).substr(0, pathAndQuery.find_first_of("?#"));
+                    if (clipPath.ends_with("/cool/clipboard"))
                     {
                         std::shared_ptr<http::Session> httpSession = http::Session::create(url);
                         if (httpSession)
@@ -1320,7 +1327,7 @@ bool ClientSession::_handleInput(const char *buffer, int length)
     else if (tokens.equals(0, "setviewreadonly"))
     {
         // only if the session has WOPI write permission
-        if (!isWritable())
+        if (!isWritable() || isReadOnly())
             return false;
 
         std::string value;
@@ -1508,32 +1515,62 @@ bool ClientSession::_handleInput(const char *buffer, int length)
     }
     else if (tokens.equals(0, "remotedoccommand"))
     {
-        std::string encodedWopiSrc;
-        if (tokens.size() < 3 || !COOLProtocol::getTokenString(tokens[1], "wopisrc", encodedWopiSrc)
-            || encodedWopiSrc.empty())
+        std::string encodedSource;
+        if (tokens.size() < 3 || !COOLProtocol::getTokenString(tokens[1], "source", encodedSource)
+            || encodedSource.empty())
         {
             sendTextFrameAndLogError("error: cmd=remotedoccommand kind=syntax");
             return false;
         }
 
-        // The inner command is everything after the wopisrc token.
-        docBroker->sendRemoteDocumentCommand(getId(), Uri::decode(encodedWopiSrc),
+        // The inner command is everything after the source token.
+        docBroker->sendRemoteDocumentCommand(getId(), Uri::decode(encodedSource),
                                              tokens.cat(' ', 2));
         return true;
     }
     else if (tokens.equals(0, "remotedocsubscribe") || tokens.equals(0, "remotedocunsubscribe"))
     {
-        std::string encodedWopiSrc;
-        if (tokens.size() < 2 ||
-            !COOLProtocol::getTokenString(tokens[1], "wopisrc", encodedWopiSrc) ||
-            encodedWopiSrc.empty())
+        std::string encodedSource;
+        if (tokens.size() < 2 || !COOLProtocol::getTokenString(tokens[1], "source", encodedSource) ||
+            encodedSource.empty())
         {
             sendTextFrameAndLogError("error: cmd=remotedocsubscribe kind=syntax");
             return false;
         }
 
-        docBroker->handleRemoteDocumentSubscribe(getId(), encodedWopiSrc,
+        docBroker->handleRemoteDocumentSubscribe(getId(), Uri::decode(encodedSource),
                                                  tokens.equals(0, "remotedocsubscribe"));
+        return true;
+    }
+    else if (tokens.equals(0, "remotelinkresolve"))
+    {
+        std::string encodedSource;
+        if (tokens.size() < 2 || !COOLProtocol::getTokenString(tokens[1], "source", encodedSource) ||
+            encodedSource.empty())
+        {
+            sendTextFrameAndLogError("error: cmd=remotelinkresolve kind=syntax");
+            return false;
+        }
+
+        docBroker->resolveRemoteDocumentSource(getId(), Uri::decode(encodedSource));
+        return true;
+    }
+    else if (tokens.equals(0, "remotelinkremove"))
+    {
+        std::string encodedSource;
+        if (tokens.size() < 2 || !COOLProtocol::getTokenString(tokens[1], "source", encodedSource) ||
+            encodedSource.empty())
+        {
+            sendTextFrameAndLogError("error: cmd=remotelinkremove kind=syntax");
+            return false;
+        }
+
+        if (!docBroker->removeRemoteDocumentSource(Uri::decode(encodedSource)))
+        {
+            sendTextFrameAndLogError("error: cmd=remotelinkremove kind=notfound");
+            return false;
+        }
+
         return true;
     }
 #endif // !MOBILEAPP && !WASMAPP
@@ -1575,6 +1612,7 @@ bool ClientSession::_handleInput(const char *buffer, int length)
     }
 #endif // !MOBILEAPP
     else if (tokens.equals(0, "outlinestate") ||
+             tokens.equals(0, "reportmousepointer") ||
              tokens.equals(0, "downloadas") ||
              tokens.equals(0, "getchildid") ||
              tokens.equals(0, "gettextselection") ||
@@ -1618,6 +1656,16 @@ bool ClientSession::_handleInput(const char *buffer, int length)
             if (tokens.equals(1, ".uno:PrepareSignature") || tokens.equals(1, ".uno:DownloadSignature"))
             {
                 return handleSignatureAction(tokens);
+            }
+            // Host locked the security marking (per-file/per-token UserCanChangeSecurityLabel):
+            // drop the command so the label dialog never opens in core, blocking apply/change/
+            // remove together. Dropped here, before forwarding to the child, so the kit/core
+            // never sees it regardless of what the client sends.
+            if (tokens.equals(1, ".uno:SecurityLabel") && _wopiFileInfo &&
+                !_wopiFileInfo->getUserCanChangeSecurityLabel())
+            {
+                LOG_WRN("Blocking .uno:SecurityLabel: host set UserCanChangeSecurityLabel=false");
+                return true;
             }
         }
 #endif
@@ -1693,7 +1741,16 @@ bool ClientSession::_handleInput(const char *buffer, int length)
         // On the desktop apps this is how the native settings reach the session.
         return handleUpdateViewSettings(firstLine);
     }
+
 #if !MOBILEAPP
+    else if (tokens.equals(0, "reloadconfig"))
+    {
+        // The settings dialog has just written this user's document settings.
+        // They are read when a document opens, so the document in front of
+        // them is still running with what it read then. The apps have a path
+        // of their own for this, taken when the shell writes the file.
+        docBroker->reinstallUserPresets(client_from_this());
+    }
     else if (tokens.equals(0, "routetokensanitycheck"))
     {
         Admin::instance().routeTokenSanityCheck();
@@ -1741,53 +1798,15 @@ bool ClientSession::_handleInput(const char *buffer, int length)
 #if !MOBILEAPP
 void ClientSession::uploadBrowserSettingsToWopiHost()
 {
-    const Authorization& auth = getAuthorization();
-    Poco::URI uriObject = DocumentBroker::getPresetUploadBaseUrl(_uriPublic);
-
-    // A relative URI has no host to send the request to.
-    if (uriObject.isRelative())
-    {
-        LOG_WRN("Not uploading browser settings: WOPI base URL ["
-                << uriObject.toString() << "] is relative");
-        return;
-    }
-
-    const std::string filePath = "/settings/userconfig/browsersetting/browsersetting.json";
-    uriObject.addQueryParameter("fileId", filePath);
-    auth.authorizeURI(uriObject);
-
-    const std::string uriAnonym = Anonymizer::anonymizeUrl(uriObject.toString());
-
-    auto httpRequest = StorageConnectionManager::createHttpRequest(uriObject, auth);
-    httpRequest.setVerb(http::Request::VERB_POST);
-    auto httpSession = StorageConnectionManager::getHttpSession(uriObject);
-
     std::ostringstream jsonStream;
     _browserSettingsJSON->stringify(jsonStream, 2);
-    httpRequest.setBody(jsonStream.str(), "application/json; charset=utf-8");
-
-    const std::string logPfx = getLogPrefix();
-    http::Session::FinishedCallback finishedCallback =
-        [uriAnonym, logPfx](const std::shared_ptr<http::Session>& wopiSession)
-    {
-        const std::shared_ptr<const http::Response> httpResponse = wopiSession->response();
-        const http::StatusLine statusLine = httpResponse->statusLine();
-        if (statusLine.statusCode() != http::StatusCode::OK)
-        {
-            LOG_ERR_S(logPfx << "Failed to upload updated browsersetting to wopiHost["
-                    << uriAnonym << "] with status[" << statusLine.reasonPhrase() << ']');
-            return;
-        }
-        LOG_TRC_S(logPfx << "Successfully uploaded browsersetting to wopiHost");
-    };
-
-    LOG_DBG("Uploading browsersetting json [" << jsonStream.str() << "] to wopiHost[" << uriAnonym
-                                              << ']');
-    httpSession->setFinishedHandler(std::move(finishedCallback));
-    httpSession->asyncRequest(httpRequest, COOLWSD::getWebServerPoll());
+    uploadSettingsToWopiHost("/settings/userconfig/browsersetting/browsersetting.json",
+                             jsonStream.str(), "browsersetting");
 }
 
-void ClientSession::uploadViewSettingsToWopiHost()
+void ClientSession::uploadSettingsToWopiHost(const std::string& filePath,
+                                             const std::string& jsonBody,
+                                             const std::string& settingName)
 {
     try
     {
@@ -1797,12 +1816,11 @@ void ClientSession::uploadViewSettingsToWopiHost()
         // A relative URI has no host to send the request to.
         if (uriObject.isRelative())
         {
-            LOG_WRN("Not uploading view settings: WOPI base URL ["
-                    << uriObject.toString() << "] is relative");
+            LOG_WRN("Not uploading " << settingName << ": WOPI base URL [" << uriObject.toString()
+                                     << "] is relative");
             return;
         }
 
-        const std::string filePath = "/settings/userconfig/viewsetting/viewsetting.json";
         uriObject.addQueryParameter("fileId", filePath);
         auth.authorizeURI(uriObject);
 
@@ -1812,13 +1830,11 @@ void ClientSession::uploadViewSettingsToWopiHost()
         httpRequest.setVerb(http::Request::VERB_POST);
         auto httpSession = StorageConnectionManager::getHttpSession(uriObject);
 
-        std::ostringstream jsonStream;
-        _viewSettingsJSON->stringify(jsonStream, 2);
-        httpRequest.setBody(jsonStream.str(), "application/json; charset=utf-8");
+        httpRequest.setBody(jsonBody, "application/json; charset=utf-8");
 
         const std::string logPfx = getLogPrefix();
         http::Session::FinishedCallback finishedCallback =
-            [uriAnonym, logPfx](const std::shared_ptr<http::Session>& wopiSession)
+            [uriAnonym, logPfx, settingName](const std::shared_ptr<http::Session>& wopiSession)
         {
             wopiSession->asyncShutdown();
 
@@ -1826,22 +1842,50 @@ void ClientSession::uploadViewSettingsToWopiHost()
             const http::StatusLine statusLine = httpResponse->statusLine();
             if (statusLine.statusCode() != http::StatusCode::OK)
             {
-                LOG_ERR_S(logPfx << "Failed to upload updated viewsetting to wopiHost["
-                        << uriAnonym << "] with status[" << statusLine.reasonPhrase() << ']');
+                LOG_ERR_S(logPfx << "Failed to upload updated " << settingName << " to wopiHost["
+                                 << uriAnonym << "] with status[" << statusLine.reasonPhrase()
+                                 << ']');
                 return;
             }
-            LOG_TRC_S(logPfx << "Successfully uploaded viewsetting to wopiHost");
+            LOG_TRC_S(logPfx << "Successfully uploaded " << settingName << " to wopiHost");
         };
 
-        LOG_DBG("Uploading viewsetting json [" << jsonStream.str() << "] to wopiHost[" << uriAnonym
-                                               << ']');
+        LOG_DBG("Uploading " << settingName << " to wopiHost[" << uriAnonym << ']');
         httpSession->setFinishedHandler(std::move(finishedCallback));
         httpSession->asyncRequest(httpRequest, COOLWSD::getWebServerPoll());
     }
     catch (const std::exception& e)
     {
-        LOG_ERR("Failed to upload viewsetting to WOPI host: " << e.what());
+        LOG_ERR("Failed to upload " << settingName << " to WOPI host: " << e.what());
     }
+}
+
+void ClientSession::uploadViewSettingsToWopiHost()
+{
+    std::ostringstream jsonStream;
+    _viewSettingsJSON->stringify(jsonStream, 2);
+    uploadSettingsToWopiHost("/settings/userconfig/viewsetting/viewsetting.json", jsonStream.str(),
+                             "viewsetting");
+}
+
+void ClientSession::uploadServerPrivateInfoToWopiHost()
+{
+    Poco::JSON::Object::Ptr serverInfo;
+    if (getServerPrivateInfo().empty() || !JsonUtil::parseJSON(getServerPrivateInfo(), serverInfo) ||
+        !serverInfo)
+        return;
+
+    Poco::JSON::Object::Ptr body = new Poco::JSON::Object();
+    for (const std::string_view& field : ServerPrivateInfo::Fields)
+    {
+        const std::string name(field);
+        std::string value;
+        JsonUtil::findJSONValue(serverInfo, name, value);
+        body->set(name, value);
+    }
+
+    uploadSettingsToWopiHost(std::string(ServerPrivateInfo::FilePath), JsonUtil::jsonToString(body),
+                             std::string(ServerPrivateInfo::GroupName));
 }
 #endif // !MOBILEAPP
 
@@ -1925,44 +1969,50 @@ std::string computeEthicalRating(const std::string& model, const std::string& ur
 
 } // anonymous namespace
 
+std::string ClientSession::resolveAISetting(Poco::JSON::Object::Ptr& viewSettings,
+                                            const Poco::JSON::Object::Ptr& userPrivateInfoObj,
+                                            bool& viewSettingsMutated, const std::string& vsKey,
+                                            const std::string& upiKey,
+                                            const std::string& cfgKey) const
+{
+    std::string value;
+    // When users are locked to the central endpoint, ignore any per-user
+    // View Settings / UserPrivateInfo and use only the coolwsd.xml value,
+    // so a user cannot point AI at their own endpoint via the settings UI,
+    // stale stored settings, or a crafted updateviewsettings request.
+    if (ConfigUtil::getConfigValue<bool>("ai.allow_user_settings", true))
+    {
+        if (viewSettings)
+            JsonUtil::findJSONValue(viewSettings, vsKey, value);
+        if (value.empty() && userPrivateInfoObj)
+        {
+            JsonUtil::findJSONValue(userPrivateInfoObj, upiKey, value);
+            if (!value.empty() && viewSettings)
+            {
+                LOG_INF("Migrating field [" << vsKey << "] from user private info");
+                viewSettings->set(vsKey, value);
+                viewSettingsMutated = true;
+            }
+        }
+    }
+    if (value.empty())
+        value = ConfigUtil::getConfigValue<std::string>(cfgKey, "");
+    return value;
+}
+
 bool ClientSession::resolveAndApplyAICredentials(Poco::JSON::Object::Ptr& viewSettings,
                                                  const Poco::JSON::Object::Ptr& userPrivateInfoObj,
                                                  bool disableAISettings, bool& viewSettingsMutated,
                                                  std::string& outModel, std::string& outRating)
 {
-    const bool allowUserSettings =
-        ConfigUtil::getConfigValue<bool>("ai.allow_user_settings", true);
-    auto resolveField = [&](const std::string& vsKey, const std::string& upiKey,
-                            const std::string& cfgKey) -> std::string
-    {
-        std::string value;
-        // When users are locked to the central endpoint, ignore any per-user
-        // View Settings / UserPrivateInfo and use only the coolwsd.xml value,
-        // so a user cannot point AI at their own endpoint via the settings UI,
-        // stale stored settings, or a crafted updateviewsettings request.
-        if (allowUserSettings)
-        {
-            if (viewSettings)
-                JsonUtil::findJSONValue(viewSettings, vsKey, value);
-            if (value.empty() && userPrivateInfoObj)
-            {
-                JsonUtil::findJSONValue(userPrivateInfoObj, upiKey, value);
-                if (!value.empty() && viewSettings)
-                {
-                    LOG_INF("Migrating field [" << vsKey << "] from user private info");
-                    viewSettings->set(vsKey, value);
-                    viewSettingsMutated = true;
-                }
-            }
-        }
-        if (value.empty())
-            value = ConfigUtil::getConfigValue<std::string>(cfgKey, "");
-        return value;
-    };
-
-    const std::string apiKey = resolveField("aiProviderAPIKey", "AIProviderAPIKey", "ai.api_key");
-    const std::string model = resolveField("aiProviderModel", "AIProviderModel", "ai.model");
-    const std::string url = resolveField("aiProviderURL", "AIProviderURL", "ai.api_url");
+    const std::string apiKey =
+        resolveAISetting(viewSettings, userPrivateInfoObj, viewSettingsMutated, "aiProviderAPIKey",
+                         "AIProviderAPIKey", "ai.api_key");
+    const std::string model =
+        resolveAISetting(viewSettings, userPrivateInfoObj, viewSettingsMutated, "aiProviderModel",
+                         "AIProviderModel", "ai.model");
+    const std::string url = resolveAISetting(viewSettings, userPrivateInfoObj, viewSettingsMutated,
+                                             "aiProviderURL", "AIProviderURL", "ai.api_url");
 
     setAIProviderAPIKey(apiKey);
     setAIProviderModel(model);
@@ -1997,40 +2047,16 @@ void ClientSession::resolveAndApplyAIImageCredentials(
     Poco::JSON::Object::Ptr& viewSettings, const Poco::JSON::Object::Ptr& userPrivateInfoObj,
     bool& viewSettingsMutated)
 {
-    const bool allowUserSettings =
-        ConfigUtil::getConfigValue<bool>("ai.allow_user_settings", true);
-    auto resolveField = [&](const std::string& vsKey, const std::string& upiKey,
-                            const std::string& cfgKey) -> std::string
-    {
-        std::string value;
-        // See resolveAndApplyAICredentials: when locked to the central
-        // endpoint, use only the coolwsd.xml value and ignore per-user input.
-        if (allowUserSettings)
-        {
-            if (viewSettings)
-                JsonUtil::findJSONValue(viewSettings, vsKey, value);
-            if (value.empty() && userPrivateInfoObj)
-            {
-                JsonUtil::findJSONValue(userPrivateInfoObj, upiKey, value);
-                if (!value.empty() && viewSettings)
-                {
-                    LOG_INF("Migrating field [" << vsKey << "] from user private info");
-                    viewSettings->set(vsKey, value);
-                    viewSettingsMutated = true;
-                }
-            }
-        }
-        if (value.empty())
-            value = ConfigUtil::getConfigValue<std::string>(cfgKey, "");
-        return value;
-    };
-
-    setAIImageProviderAPIKey(
-        resolveField("aiImageProviderAPIKey", "AIImageProviderAPIKey", "ai.image_api_key"));
-    setAIImageProviderURL(
-        resolveField("aiImageProviderURL", "AIImageProviderURL", "ai.image_api_url"));
-    setAIImageModel(resolveField("aiImageModel", "AIImageModel", "ai.image_model"));
-    setAIImageSize(resolveField("aiImageSize", "AIImageSize", "ai.image_size"));
+    setAIImageProviderAPIKey(resolveAISetting(viewSettings, userPrivateInfoObj, viewSettingsMutated,
+                                              "aiImageProviderAPIKey", "AIImageProviderAPIKey",
+                                              "ai.image_api_key"));
+    setAIImageProviderURL(resolveAISetting(viewSettings, userPrivateInfoObj, viewSettingsMutated,
+                                           "aiImageProviderURL", "AIImageProviderURL",
+                                           "ai.image_api_url"));
+    setAIImageModel(resolveAISetting(viewSettings, userPrivateInfoObj, viewSettingsMutated,
+                                     "aiImageModel", "AIImageModel", "ai.image_model"));
+    setAIImageSize(resolveAISetting(viewSettings, userPrivateInfoObj, viewSettingsMutated,
+                                    "aiImageSize", "AIImageSize", "ai.image_size"));
 }
 
 void ClientSession::restoreKeptViewSettingSecrets(Poco::JSON::Object::Ptr& viewSettings)
@@ -2048,7 +2074,7 @@ void ClientSession::restoreKeptViewSettingSecrets(Poco::JSON::Object::Ptr& viewS
     // fields here must match ViewSettings::SecretFields.
     auto keep = [&](const std::string& field, const std::string& applied)
     {
-        const std::string flag = field + std::string(ViewSettings::StoredFlagSuffix);
+        const std::string flag = field + std::string(SettingsSecrets::StoredFlagSuffix);
         bool wantKeep = false;
         if (viewSettings->has(flag))
         {
@@ -2265,8 +2291,7 @@ void ClientSession::overrideDocOption()
         return;
     }
 
-    std::string spellOnline, darkTheme, darkBackgroundForTheme, accessibilityState;
-    JsonUtil::findJSONValue(_browserSettingsJSON, "spellOnline", spellOnline);
+    std::string darkTheme, darkBackgroundForTheme, accessibilityState;
     JsonUtil::findJSONValue(_browserSettingsJSON, "darkTheme", darkTheme);
     JsonUtil::findJSONValue(_browserSettingsJSON, "accessibilityState", accessibilityState);
     Poco::JSON::Object::Ptr darkBackgroundObj =
@@ -2297,6 +2322,38 @@ void ClientSession::overrideDocOption()
                                                                       << ']');
     }
 
+    // The automatic spell checking choice is stored per document type, because a
+    // spreadsheet of codes and abbreviations wants a different default from a text
+    // document. Which one applies is only known once the document is loaded, so
+    // hand the kit every choice that was made and let it pick.
+    //
+    // A setting written before the choice became per document type names no type: it
+    // was whatever the user last chose in any application, so it still stands for the
+    // document types that shared its default. Calc no longer does, and is left to its
+    // own default of off. The browser migrates its own copy of that setting on
+    // startup, but this one lives in the integrator's store, which a client cannot
+    // rewrite, so the untyped value has to keep being read here.
+    std::string shared;
+    JsonUtil::findJSONValue(_browserSettingsJSON, "spellOnline", shared);
+
+    std::string spellOnline;
+    for (const std::string_view docType : { "text", "spreadsheet", "presentation", "drawing" })
+    {
+        std::string value;
+        if (Poco::JSON::Object::Ptr docTypeObj = _browserSettingsJSON->getObject(std::string(docType)))
+            JsonUtil::findJSONValue(docTypeObj, "spellOnline", value);
+        if (value.empty() && docType != "spreadsheet")
+            value = shared;
+        if (value.empty())
+            continue;
+
+        if (!spellOnline.empty())
+            spellOnline += ',';
+        spellOnline += docType;
+        spellOnline += ':';
+        spellOnline += value;
+    }
+
     if (!spellOnline.empty())
     {
         setSpellOnline(spellOnline);
@@ -2307,6 +2364,91 @@ void ClientSession::overrideDocOption()
     {
         setAccessibilityState(accessibilityState == "true" ? true : false);
         LOG_DBG("Overriding parsed docOption accessibilityState[" << accessibilityState << ']');
+    }
+}
+
+bool ClientSession::parseRectangle(const std::string& text, Util::Rectangle& rectangle)
+{
+    StringVector parts(StringVector::tokenize(text, ','));
+    if (parts.size() < 4)
+        return false;
+
+    int x = 0, y = 0, width = 0, height = 0;
+    if (!stringToInteger(parts[0], x) || !stringToInteger(parts[1], y) ||
+        !stringToInteger(parts[2], width) || !stringToInteger(parts[3], height))
+        return false;
+
+    rectangle = Util::Rectangle(x, y, width, height);
+    return true;
+}
+
+void ClientSession::sendLastViewPosition(const std::shared_ptr<DocumentBroker>& docBroker)
+{
+    const DocumentBroker::ViewPosition& position = docBroker->getLastViewPosition();
+    if (!position.hasZoom() && !position.hasVisibleArea() && !position.editMode)
+        return;
+
+    std::ostringstream oss;
+    oss << "viewposition:";
+    if (position.editMode)
+        oss << " editmode=1";
+    if (position.hasZoom())
+        oss << " zoompercent=" << position.zoomPercent;
+    if (position.hasVisibleArea())
+    {
+        // Document twips, as the client sends up in clientvisiblearea.
+        oss << " x=" << position.visibleArea.getLeft() << " y=" << position.visibleArea.getTop()
+            << " width=" << position.visibleArea.getWidth()
+            << " height=" << position.visibleArea.getHeight();
+    }
+
+    LOG_DBG("Sending the position the last view of this document left: " << oss.str());
+    sendTextFrame(oss.str());
+}
+
+void ClientSession::restoreLastViewSelection(const std::shared_ptr<DocumentBroker>& docBroker)
+{
+    const DocumentBroker::ViewPosition& position = docBroker->getLastViewPosition();
+
+    // The ends the kit reports are thin upright bars, and a corner of one can fall on the
+    // next character, so selecttext aims at the middle of the height.
+    const auto middleY = [](const Util::Rectangle& r)
+    { return r.getTop() + r.getHeight() / 2; };
+
+    if (position.hasCellAddress())
+    {
+        // Naming the cell lands on it whatever the view is showing.
+        const std::string command = "uno .uno:GoToCell {\"ToPoint\":{\"type\":\"string\","
+                                    "\"value\":\"" + position.cellAddress + "\"}}";
+        docBroker->forwardToChild(client_from_this(), command);
+        LOG_DBG("Put the cursor back on cell [" << position.cellAddress
+                                                << "] the last view of this document was on");
+        return;
+    }
+
+    if (position.hasSelection())
+    {
+        // start puts the anchor down and end drags to the far edge, leaving the cursor there.
+        docBroker->forwardToChild(client_from_this(),
+                                  "selecttext type=start x=" +
+                                      std::to_string(position.selectionStart.getLeft()) + " y=" +
+                                      std::to_string(middleY(position.selectionStart)));
+        docBroker->forwardToChild(client_from_this(),
+                                  "selecttext type=end x=" +
+                                      std::to_string(position.selectionEnd.getRight()) + " y=" +
+                                      std::to_string(middleY(position.selectionEnd)));
+        LOG_DBG("Put back the selection the last view of this document had");
+        return;
+    }
+
+    if (position.hasCursor())
+    {
+        // Both ends at one point leave a cursor there with nothing selected.
+        const std::string at = " x=" + std::to_string(position.cursor.getLeft()) + " y=" +
+                               std::to_string(middleY(position.cursor));
+        docBroker->forwardToChild(client_from_this(), "selecttext type=start" + at);
+        docBroker->forwardToChild(client_from_this(), "selecttext type=end" + at);
+        LOG_DBG("Put the cursor back where the last view of this document had it");
     }
 }
 
@@ -2325,34 +2467,57 @@ bool ClientSession::loadDocument(const char* /*buffer*/, int /*length*/,
     LOG_INF("Requesting document load from child.");
     try
     {
-        std::string timestamp;
-        int loadPart = -1;
-        parseDocOptions(tokens, loadPart, timestamp);
-        overrideDocOption();
-
+        std::string loadPart;
 #if !MOBILEAPP
-        // A headless session names the docKeys already on its connection
-        // chain, so a subscription that would close a cycle can be refused.
         bool namedDocKeyChain = false;
+#endif
         for (std::size_t i = 1; i < tokens.size(); ++i)
         {
-            std::string docKeyChain;
-            if (!COOLProtocol::getTokenString(tokens[i], "remotechain", docKeyChain) ||
-                docKeyChain.empty())
-                continue;
-
-            if (!_isRemoteDocumentConnection)
+            std::string name;
+            std::string value;
+            if (!COOLProtocol::parseNameValuePair(tokens[i], name, value))
             {
-                LOG_WRN("Ignoring the connection chain named by session ["
-                        << getId()
-                        << "]: the connection is not one a RemoteDocumentBroker made");
+                LOG_WRN("Unexpected load token [" << tokens[i] << "]. Skipping.");
                 continue;
             }
 
-            namedDocKeyChain = true;
-            docBroker->addToIncomingDocKeyChain(docKeyChain);
+            if (name == "timestamp")
+            {
+                // The browser sends the document's timestamp, and nothing reads it.
+                continue;
+            }
+
+#if !MOBILEAPP
+            if (name == "remotechain")
+            {
+                // A headless session names the docKeys already on its connection
+                // chain, so a subscription that would close a cycle can be refused.
+                if (value.empty())
+                    continue;
+
+                if (!_isRemoteDocumentConnection)
+                {
+                    LOG_WRN("Ignoring the connection chain named by session ["
+                            << getId()
+                            << "]: the connection is not one a RemoteDocumentBroker made");
+                    continue;
+                }
+
+                namedDocKeyChain = true;
+                docBroker->addToIncomingDocKeyChain(value);
+                continue;
+            }
+#endif
+
+            if (!applyBrowserLoadOption(name, value, loadPart))
+                LOG_WRN("Ignoring the load option [" << name
+                        << "]: a browser's load message does not carry it");
         }
 
+        disableSpellCheckIfReadOnly();
+        overrideDocOption();
+
+#if !MOBILEAPP
         // A headless connection carries the chain of the document, one naming no chain
         // is refused instead, so that cycle protection is not skipped.
         if (_isRemoteDocumentConnection && !namedDocKeyChain)
@@ -2361,6 +2526,14 @@ bool ClientSession::loadDocument(const char* /*buffer*/, int /*length*/,
             return false;
         }
 #endif
+
+        // If an earlier view of this document recorded a part, this view opens on that part.
+        const DocumentBroker::ViewPosition& lastPosition = docBroker->getLastViewPosition();
+        if (loadPart.empty() && lastPosition.hasPart())
+        {
+            loadPart = lastPosition.part;
+            LOG_DBG("Loading on part " << loadPart << ", where the last view of this document was");
+        }
 
 #if defined(QTAPP) || defined(MACOSAPP)
         // The kit reads SignatureCert/Key/Ca from authorprivateinfo (set at load
@@ -2470,7 +2643,7 @@ bool ClientSession::loadDocument(const char* /*buffer*/, int /*length*/,
             oss << " isAllowManageRedlines=true";
         }
 
-        if (loadPart >= 0)
+        if (!loadPart.empty())
         {
             oss << " part=" << loadPart;
         }
@@ -2515,6 +2688,11 @@ bool ClientSession::loadDocument(const char* /*buffer*/, int /*length*/,
             oss << " darkBackground=" << getDarkBackground();
         }
 
+        if (!getFocusRingColor().empty())
+        {
+            oss << " focusRingColor=" << getFocusRingColor();
+        }
+
         if (!getWatermarkText().empty())
         {
             std::string encodedWatermarkText;
@@ -2549,11 +2727,6 @@ bool ClientSession::loadDocument(const char* /*buffer*/, int /*length*/,
         if (ConfigUtil::getConfigValue<bool>("accessibility.enable", Util::isMobileApp()))
         {
             oss << " accessibilityState=" << getAccessibilityState();
-        }
-
-        if (!getDocOptions().empty())
-        {
-            oss << " options=" << getDocOptions();
         }
 
         if (_wopiFileInfo && !_wopiFileInfo->getTemplateSource().empty())
@@ -2745,6 +2918,19 @@ bool ClientSession::filterMessage(const std::string& message) const
         if (tokens.size() >= 3)
             getTokenString(tokens[2], "id", id);
         allowed = filterDownloadAs(id);
+
+        // Printing produces a PDF, so a print in any other format is an export.
+        if (allowed && id == "print")
+        {
+            std::string format;
+            if (tokens.size() >= 4)
+                getTokenString(tokens[3], "format", format);
+            if (format != "pdf")
+            {
+                allowed = false;
+                LOG_WRN("Refusing a print to format [" << format << ']');
+            }
+        }
     }
     else if (tokens.equals(0, "gettextselection"))
     {
@@ -2780,6 +2966,11 @@ bool ClientSession::filterDownloadAs(const std::string& id) const
         {
             allowed = false;
             LOG_WRN("WOPI host has disabled slideshow for this session");
+        }
+        else if (id != "print" && id != "export" && id != "slideshow")
+        {
+            allowed = false;
+            LOG_WRN("Unknown downloadas id [" << id << ']');
         }
     }
     else
@@ -3105,10 +3296,10 @@ void ClientSession::recordSlideLinkSources(const std::shared_ptr<Message>& paylo
         if (links.isNull())
             return;
 
-        // The names come out of the document's own content, so a document holding many links, or
-        // a long name, names no more than this.
+        // The persistent links come out of the document's own content, so a document holding
+        // many links, or a long one, names no more than this.
         constexpr std::size_t MaxSources = 64;
-        constexpr std::size_t MaxNameLength = 256;
+        constexpr std::size_t MaxNameLength = 1024;
         for (std::size_t i = 0; i < links->size() && names.size() < MaxSources; ++i)
         {
             Poco::JSON::Object::Ptr link = links->getObject(i);
@@ -3687,7 +3878,20 @@ ClientSession::handleOpenDocKitToClientMessage(const std::shared_ptr<Message>& p
             _kitViewId = std::atoi(statusJsonObject->get("viewid").toString().c_str());
 
         // Forward the status response to the client.
-        return forwardToClient(payload);
+        const bool forwarded = forwardToClient(payload);
+
+        // The position the last view of this document left goes on once, after the first
+        // status. The kit sends a status again whenever the document size changes.
+        if (!_restoredLastViewPosition)
+        {
+            _restoredLastViewPosition = true;
+
+            // The client places its own view; the cursor and the selection go to the kit.
+            sendLastViewPosition(docBroker);
+            restoreLastViewSelection(docBroker);
+        }
+
+        return forwarded;
     }
     else if (tokens.equals(0, "statusupdate:"))
     {
@@ -3774,6 +3978,31 @@ ClientSession::handleOpenDocKitToClientMessage(const std::shared_ptr<Message>& p
             docBroker->forwardToChild(client_from_this(), renderThumbnailCmd.str());
         }
     }
+    else if (tokens.equals(0, "textselectionstart:") || tokens.equals(0, "textselectionend:"))
+    {
+        // The payload is a rectangle in document twips, or "EMPTY" when nothing is selected.
+        const bool isStart = tokens.equals(0, "textselectionstart:");
+        Util::Rectangle rectangle;
+        if (parseRectangle(firstLine.substr(firstLine.find(':') + 1), rectangle))
+        {
+            if (isStart)
+                _clientSelectionStart = rectangle;
+            else
+                _clientSelectionEnd = rectangle;
+        }
+        else if (isStart)
+            _clientSelectionStart = Util::Rectangle();
+        else
+            _clientSelectionEnd = Util::Rectangle();
+
+        return forwardToClient(payload);
+    }
+    else if (tokens.equals(0, "celladdress:"))
+    {
+        _clientCellAddress = Util::trimmed(firstLine.substr(firstLine.find(':') + 1));
+
+        return forwardToClient(payload);
+    }
     else if (tokens.equals(0, "invalidatecursor:"))
     {
         assert(firstLine.size() == payload->size() &&
@@ -3798,6 +4027,7 @@ ClientSession::handleOpenDocKitToClientMessage(const std::shared_ptr<Message>& p
                 }
 
                 docBroker->invalidateCursor(x, y, w, h);
+                _clientCursor = Util::Rectangle(x, y, w, h);
 
                 // session used for thumbnailing and target already was set
                 if (_thumbnailSession)
@@ -4006,7 +4236,11 @@ void ClientSession::abortConversion(const std::shared_ptr<DocumentBroker>& docBr
 
     LOG_DBG("Conversion request of [" << docBroker->getDocKey() << "] failed: " << errorKind);
     if (!saveAsSocket)
-        LOG_ERR("Error saveas socket missing in isConvertTo mode");
+        LOG_WRN("Conversion of [" << docBroker->getDocKey() << "] failed with [" << errorKind
+                                  << "] after the client disconnected, "
+                                  << std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now() - _viewLoadStart)
+                                  << " after the load started. Nothing to report back.");
     else if (errorKind == "passwordrequired:to-view" ||
              errorKind == "passwordrequired:to-modify")
     {
@@ -4138,7 +4372,6 @@ bool ClientSession::handleSaveAs(const std::shared_ptr<Message>& payload,
     else
     {
         // using the convert-to REST API
-        // TODO: Send back error when there is no output.
         if (!resultURL.getPath().empty())
         {
             LOG_TRC("Sending file: " << resultURL.getPath());
@@ -4151,9 +4384,21 @@ bool ClientSession::handleSaveAs(const std::shared_ptr<Message>& payload,
             response.setContentType("application/octet-stream");
 
             if (!saveAsSocket)
-                LOG_ERR("Error saveas socket missing in isConvertTo mode");
+                LOG_WRN("Conversion of [" << docBroker->getDocKey()
+                                          << "] finished after the client disconnected, "
+                                          << std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                 std::chrono::steady_clock::now() - _viewLoadStart)
+                                          << " after the load started. Dropping the result.");
             else
                 HttpHelper::sendFileAndShutdown(saveAsSocket, resultURL.getPath(), response);
+        }
+        else if (saveAsSocket)
+        {
+            // The conversion produced no file, so the client gets an error status.
+            LOG_WRN("Conversion of [" << docBroker->getDocKey() << "] produced no output");
+            http::Response response(http::StatusCode::InternalServerError);
+            response.set("X-ERROR-KIND", "nooutput");
+            saveAsSocket->sendAndShutdown(response);
         }
 
         // Conversion is done, cleanup this fake session.
@@ -4381,7 +4626,12 @@ void ClientSession::dumpState(std::ostream& os)
        << "\n\t\ttile size Twips: " << _tileWidthTwips << 'x' << _tileHeightTwips
        << "\n\t\tclientZoomPercent: " << _clientZoomPercent
        << "\n\t\tclientEditMode: "
-       << (_clientEditMode ? (*_clientEditMode ? "editing" : "viewing") : "unknown")
+       << (_clientEditMode.has_value() ? (*_clientEditMode ? "editing" : "viewing") : "unknown")
+       << "\n\t\trestoredLastViewPosition: " << _restoredLastViewPosition
+       << "\n\t\tclientCursor: " << _clientCursor.getLeft() << ',' << _clientCursor.getTop()
+       << "\n\t\tclientSelection: " << _clientSelectionStart.getLeft() << ','
+       << _clientSelectionStart.getTop() << " to " << _clientSelectionEnd.getLeft() << ','
+       << _clientSelectionEnd.getTop()
        << "\n\t\tkit ViewId: " << _kitViewId
        << "\n\t\tour URL (un-trusted): " << _serverURL.getSubURLForEndpoint("")
        << "\n\t\tisTextDocument: " << _isTextDocument
@@ -4389,7 +4639,7 @@ void ClientSession::dumpState(std::ostream& os)
        << "\n\t\tclipboardKeys[1]: " << _clipboardKeys[1]
        << "\n\t\tclip sockets: " << _clipSockets.size()
        << "\n\t\tproxy access:: " << _proxyAccess
-       << "\n\t\trelatedDocumentToken set: " << !_relatedDocumentToken.empty()
+       << "\n\t\tlinkToken set: " << !_linkToken.empty()
        << "\n\t\tisRemoteDocumentConnection: " << _isRemoteDocumentConnection
        << "\n\t\tclientSelectedMode: " << _clientSelectedMode
        << "\n\t\tvisibleAreaMode: " << _visibleAreaMode

@@ -316,7 +316,7 @@ export class CommentSection extends CanvasSectionObject {
 		this.sectionProperties.width = Math.round(1 * app.dpiScale); // Configurable variable.
 		this.sectionProperties.scrollAnnotation = null; // For impress, when 1 or more comments exist.
 		this.sectionProperties.commentWidth = CommentSection.getCommentWidth();
-		this.sectionProperties.commentWidthBigger =  588 * app.dpiScale;
+		this.sectionProperties.commentWidthBigger = CommentSection.getBiggerCommentWidth();
 		this.sectionProperties.deflectionOfSelectedComment = 160; // CSS pixels.
 		this.sectionProperties.showSelectedBigger = false;
 		this.sectionProperties.calcCurrentComment = null; // We don't automatically show a Calc comment when cursor is on its cell. But we remember it to show if user presses Alt+C keys.
@@ -528,6 +528,10 @@ export class CommentSection extends CanvasSectionObject {
 		return 200 * 1.3 * app.dpiScale;
 	}
 
+	public static getBiggerCommentWidth(): number {
+		return 588 * app.dpiScale;
+	}
+
 	/// If the current layout has more than one pages in a row, so the comment should be next to
 	/// the document content instead of next to the page.
 	private static isMultiColumnLayout(): boolean {
@@ -549,7 +553,8 @@ export class CommentSection extends CanvasSectionObject {
 		}
 		else {
 			const availableSpace = (this.containerObject.getDocumentAnchorSection().size[0] - app.activeDocument.fileSize.pX) * 0.5;
-			return Math.round(availableSpace);
+			// Rounding down keeps the two margins together within the gap.
+			return Math.floor(availableSpace);
 		}
 	}
 
@@ -1858,6 +1863,9 @@ export class CommentSection extends CanvasSectionObject {
 	}
 
 	public onResize (): void {
+		// A browser zoom changes app.dpiScale and arrives as a resize.
+		this.sectionProperties.commentWidth = CommentSection.getCommentWidth();
+		this.sectionProperties.commentWidthBigger = CommentSection.getBiggerCommentWidth();
 		this.checkCollapseState();
 		// When window is resized, it may mean that comment wizard is closed. So we hide the highlights.
 		this.removeHighlighters();
@@ -1871,6 +1879,12 @@ export class CommentSection extends CanvasSectionObject {
 		}
 
 		this._commentPositionDirty = true;
+	}
+
+	// The comments are laid out again on the next frame, without animation.
+	public layoutOnNextDraw (): void {
+		this._commentPositionDirty = true;
+		app.sectionContainer.requestReDraw();
 	}
 
 	public onDraw (frameCount?: number, elapsedTime?: number): void {
@@ -1890,7 +1904,9 @@ export class CommentSection extends CanvasSectionObject {
 	}
 
 	public showHideComment (annotation: Comment): void {
-		// This manually shows/hides comments
+		// This manually shows/hides comments. A hidden comment is shown again only while comments
+		// as a whole are shown.
+		const commentsShown = this.sectionProperties.show !== false;
 		if (!this.sectionProperties.showResolved && app.map._docLayer._docType === 'text') {
 			const hide = annotation.isContainerVisible() && annotation.sectionProperties.data.resolved === 'true';
 
@@ -1901,7 +1917,8 @@ export class CommentSection extends CanvasSectionObject {
 				annotation.hide();
 				annotation.update();
 			}
-			else if (!hide && !annotation.isContainerVisible() && annotation.sectionProperties.data.resolved === 'false') {
+			else if (!hide && !annotation.isContainerVisible() && annotation.sectionProperties.data.resolved === 'false'
+				&& commentsShown) {
 				annotation.show();
 				annotation.update();
 			}
@@ -1909,7 +1926,7 @@ export class CommentSection extends CanvasSectionObject {
 		}
 		else if (app.map._docLayer._docType === 'presentation' || app.map._docLayer._docType === 'drawing') {
 			if (annotation.sectionProperties.partIndex === app.map._docLayer._selectedPart || app.file.fileBasedView) {
-				if (!annotation.isContainerVisible()) {
+				if (!annotation.isContainerVisible() && commentsShown) {
 					annotation.show();
 					annotation.update();
 					this.update();
@@ -2344,7 +2361,8 @@ export class CommentSection extends CanvasSectionObject {
 			const comment = this.getComment(id);
 			if (comment) {
 				const selection = obj[dataroot].searchSelection.split(",");
-				comment.selectText(parseInt(selection[0]), parseInt(selection[1]), parseInt(selection[2]), parseInt(selection[3]));
+				comment.selectText(parseInt(selection[0]), parseInt(selection[1]), parseInt(selection[2]), parseInt(selection[3]),
+					obj[dataroot].searchText, obj[dataroot].searchOccurrence);
 				this.showHideComment(comment);
 			}
 		}
@@ -2852,6 +2870,11 @@ export class CommentSection extends CanvasSectionObject {
 			commentBottomY,
 		);
 
+		// The layout sets how much of each comment text is shown, so a search match in a comment
+		// is scrolled into view after it.
+		for (const comment of this.sectionProperties.commentList)
+			comment.revealSearchSelection();
+
 		this.disableLayoutAnimation = false;
 	}
 
@@ -2972,6 +2995,12 @@ export class CommentSection extends CanvasSectionObject {
 				}
 			}
 		}
+
+		// The list records the collapsed layout only while comments are shown, so a list that
+		// was hidden when the layout collapsed takes the collapsed state on here. A click on a
+		// collapsed comment opens it only when the list is collapsed as well.
+		if (state && commentShouldCollapse && !this.isCollapsed)
+			this.setCollapsed();
 
 		CommentSection.showingEveryComment = false;
 		this.update();

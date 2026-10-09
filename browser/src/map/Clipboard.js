@@ -84,8 +84,14 @@ window.L.Clipboard = window.L.Class.extend({
 		document.oncut = function(ev)   { return that.cut(ev); };
 		document.oncopy = function(ev)  { return that.copy(ev); };
 		document.onpaste = function(ev) {
-			if (window.ThisIsTheMacOSApp || window.ThisIsTheWindowsApp) {
-				// For each app that uses the COKitClipboardProvider API
+			if (window.mode.isCODesktop()) {
+				// A text field of our own, such as a dialog's input, takes the paste itself.
+				if (that._isAnyInputFieldSelected() && !that._isFormulabarSelected()) {
+					window.app.console.debug('Paste: the focused text field takes the paste');
+					return;
+				}
+				// The desktop provider apps map the paste event straight to
+				// .uno:Paste; the iOS app handles it in paste() instead.
 				ev.preventDefault();
 				window.postMobileMessage('uno .uno:Paste');
 				return;
@@ -492,7 +498,7 @@ window.L.Clipboard = window.L.Class.extend({
 	},
 
 	_sendToInternalClipboard: async function (content) {
-		if (window.ThisIsTheiOSApp || window.ThisIsTheMacOSApp || window.ThisIsTheWindowsApp) {
+		if (window.mode.hasEngineClipboardProvider()) {
 			// Nothing to send: the engine serves the paste on the following
 			// .uno:Paste, either from our own copy (when we still own the platform
 			// clipboard) or by reading the platform clipboard through the installed
@@ -552,6 +558,7 @@ window.L.Clipboard = window.L.Class.extend({
 				// send the image URL then.
 				const template = document.createElement('template');
 				// Parse via <template> to decode e.g. &amp; -> &.
+				// eslint-disable-next-line no-restricted-syntax -- parsed in an inert template to decode entities
 				template.innerHTML = htmlText;
 				const img = template.content.querySelector('img');
 				const url = img ? img.getAttribute('src') : null;
@@ -674,6 +681,10 @@ window.L.Clipboard = window.L.Class.extend({
 		if (cool.Comment.isAnyFocus())
 		    return true;
 
+		// Editeng JSDialog widgets, e.g. the Impress notes bottom panel.
+		if (this._activeEditEngine())
+			return true;
+
 		if (forCopy) {
 			let selection = window.getSelection();
 			selection = selection && selection.toString();
@@ -688,6 +699,30 @@ window.L.Clipboard = window.L.Class.extend({
 		if ($('#sc_input_window').is(':focus'))
 			return true;
 		return false;
+	},
+
+	// The editengine widget the user is "in" for clipboard purposes.
+	_activeEditEngine: function() {
+		const active = document.activeElement;
+		const live = active && active.closest ? active.closest('.ui-editengine') : null;
+		if (live) {
+			return live;
+		}
+		// Ignore a dropdown that steals the real focus temporarily.
+		const jsdialog = this._map.jsdialog;
+		if (jsdialog && jsdialog.dialogs) {
+			for (const id in jsdialog.dialogs) {
+				const dialog = jsdialog.dialogs[id];
+				// A real dialog, not a dropdown?
+				if (!dialog.isDropdown) continue;
+				const prev = dialog.lastFocusedElement;
+				const editengine = prev && prev.closest ? prev.closest('.ui-editengine') : null;
+				if (editengine) {
+					return editengine;
+				}
+			}
+		}
+		return null;
 	},
 
 	// Does the selection of text before an event comes in
@@ -775,16 +810,29 @@ window.L.Clipboard = window.L.Class.extend({
 
 		this._unoCommandForCopyCutPaste = cmd;
 
+		if (operation === 'paste') {
+			// Execute the operation on the active editeng widget, not on the document.
+			const editengineForPaste = this._activeEditEngine();
+			if (editengineForPaste && this._navigatorClipboardRead(false)) {
+				this._pendingEditEnginePaste = editengineForPaste;
+				return;
+			}
+		}
+
+		if ((operation === 'copy' || operation === 'cut') && this._activeEditEngine()) {
+			// Execute the command on the active editeng widget.
+			document.execCommand(operation);
+			this._unoCommandForCopyCutPaste = null;
+			return;
+		}
+
 		if (operation !== 'paste' && cmd !== undefined && this._navigatorClipboardWrite(params)) {
 			// This is the codepath where an UNO command initiates the clipboard
 			// operation.
 			return;
 		}
 
-		if (!window.ThisIsTheiOSApp && // in mobile apps, we want to drop straight to navigatorClipboardRead as execCommand will require user interaction...
-			!window.ThisIsTheMacOSApp &&
-			!window.ThisIsTheWindowsApp &&
-			!window.ThisIsTheQtApp &&
+		if (!window.mode.hasEngineClipboardProvider() && // in mobile apps, we want to drop straight to navigatorClipboardRead as execCommand will require user interaction...
 			document.execCommand(operation) &&
 			serial !== this._clipboardSerial) {
 			window.app.console.log('copied successfully');
@@ -956,7 +1004,7 @@ window.L.Clipboard = window.L.Class.extend({
 
 	// Executes the navigator.clipboard.write() call, if it's available.
 	_navigatorClipboardWrite: function(params) {
-		if (!window.L.Browser.clipboardApiAvailable && !window.ThisIsTheiOSApp && !window.ThisIsTheMacOSApp && !window.ThisIsTheWindowsApp && !window.ThisIsTheQtApp) {
+		if (!window.L.Browser.clipboardApiAvailable && !window.mode.hasEngineClipboardProvider()) {
 			return false;
 		}
 
@@ -970,17 +1018,6 @@ window.L.Clipboard = window.L.Class.extend({
 
 	_asyncAttemptNavigatorClipboardWrite: async function(params) {
 		const command = this._unoCommandForCopyCutPaste;
-
-		if (window.ThisIsTheQtApp) {
-			// Qt handles UNO command and clipboard sync only via COPY/CUT/COPYSLIDE messages.
-			if (command === '.uno:Cut')
-				window.postMobileMessage('CUT');
-			else if (command === '.uno:CopySlide')
-				window.postMobileMessage('COPYSLIDE');
-			else
-				window.postMobileMessage('COPY');
-			return;
-		}
 
 		const check_ = this._sendCommandAndWaitForCompletion(command, params);
 
@@ -997,7 +1034,7 @@ window.L.Clipboard = window.L.Class.extend({
 		// I don't like it either :). If you change this make sure to thoroughly test
 		// cross-browser and cross-device!
 
-		if (window.ThisIsTheiOSApp || window.ThisIsTheMacOSApp || window.ThisIsTheWindowsApp) {
+		if (window.mode.hasEngineClipboardProvider()) {
 			// The engine advertises the copied formats straight onto the system
 			// clipboard through the installed clipboard provider, so there is no
 			// write to make here; just confirm the copy went through.
@@ -1111,7 +1148,7 @@ window.L.Clipboard = window.L.Class.extend({
 
 	// Executes the navigator.clipboard.read() call, if it's available.
 	_navigatorClipboardRead: function(isSpecial) {
-		if (!window.L.Browser.clipboardApiAvailable && !window.ThisIsTheiOSApp && !window.ThisIsTheMacOSApp && !window.ThisIsTheWindowsApp) {
+		if (!window.L.Browser.clipboardApiAvailable && !window.mode.hasEngineClipboardProvider()) {
 			return false;
 		}
 
@@ -1123,7 +1160,7 @@ window.L.Clipboard = window.L.Class.extend({
 	// ClipboardItem array, or null on the apps whose engine reads the system
 	// clipboard itself.
 	_readClipboardItems: async function() {
-		if (window.ThisIsTheiOSApp || window.ThisIsTheMacOSApp || window.ThisIsTheWindowsApp)
+		if (window.mode.hasEngineClipboardProvider())
 			// The engine clipboard provider reads the pasteboard itself on
 			// .uno:Paste, so there is nothing to fetch here. Reporting null
 			// drops straight to an internal paste.
@@ -1159,6 +1196,10 @@ window.L.Clipboard = window.L.Class.extend({
 				this._afterCopyCutPaste('paste');
 			}
 			return;
+		} finally {
+			// If read() failed, forget about our editeng paste target.
+			if (!clipboardContents)
+				this._pendingEditEnginePaste = null;
 		}
 
 		if (clipboardContents.length < 1) {
@@ -1223,25 +1264,6 @@ window.L.Clipboard = window.L.Class.extend({
 			// perform internal operations
 			app.socket.sendMessage('uno ' + cmd);
 			return true;
-		}
-
-		if (window.ThisIsTheQtApp) {
-			if (cmd === '.uno:Cut') {
-				window.postMobileMessage('CUT');
-				return true;
-			} else if (cmd === '.uno:Copy') {
-				window.postMobileMessage('COPY');
-				return true;
-			} else if (cmd === '.uno:CopySlide') {
-				window.postMobileMessage('COPYSLIDE');
-				return true;
-			} else if (cmd === '.uno:Paste') {
-				window.postMobileMessage('PASTE');
-				return true;
-			} else if (cmd === '.uno:PasteSpecial') {
-				window.postMobileMessage('PASTESPECIAL');
-				return true;
-			}
 		}
 
 		if (cmd === '.uno:Copy' || cmd === '.uno:CopyHyperlinkLocation' || cmd === '.uno:CopySlide') {
@@ -1336,6 +1358,22 @@ window.L.Clipboard = window.L.Class.extend({
 
 		window.app.console.log('Paste');
 
+		// Paste to the active editeng widget, not to the document.
+		const editengine = this._pendingEditEnginePaste;
+		this._pendingEditEnginePaste = null;
+		if (editengine && ev.clipboardData) {
+			const text = ev.clipboardData.getData('text/plain');
+			if (text) {
+				const dt = new DataTransfer();
+				dt.setData('text/plain', text);
+				const evt = new ClipboardEvent('paste', {
+					clipboardData: dt, bubbles: false, cancelable: true,
+				});
+				editengine.dispatchEvent(evt);
+			}
+			return;
+		}
+
 		if (this._isAnyInputFieldSelected() && !this._isFormulabarSelected())
 			return;
 
@@ -1353,12 +1391,6 @@ window.L.Clipboard = window.L.Class.extend({
 			ev.preventDefault();
 			this._map._textInput._abortComposition(ev);
 			this._clipboardSerial++;
-
-			if (window.ThisIsTheQtApp) {
-				// Native code handles clipboard sync + paste entirely.
-				window.postMobileMessage('PASTE');
-				return false;
-			}
 
 			if (window.ThisIsTheiOSApp) {
 				// The engine reads the system pasteboard itself, through the
@@ -1391,6 +1423,7 @@ window.L.Clipboard = window.L.Class.extend({
 		this._selectionContent = html;
 		this._selectionPlainTextContent = plainText;
 		if (window.L.Browser.cypressTest) {
+			// eslint-disable-next-line no-restricted-syntax -- test-only copy of the selection markup
 			this._dummyDiv.innerHTML = html;
 			this._dummyPlainDiv.innerText = plainText;
 		}

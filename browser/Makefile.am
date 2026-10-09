@@ -43,15 +43,21 @@ if !ENABLE_MOBILEAPP
 # actually exists), so we don't ship languages the engine does not support.
 L10N_JSON = $(foreach L,$(L10N_LANGS),$(if $(wildcard $(srcdir)/po/help-$(L).po),$(DIST_FOLDER)/l10n/help-$(L).json))
 L10N_JSON += $(foreach L,$(L10N_LANGS),$(if $(wildcard $(srcdir)/po/ui-$(L).po),$(DIST_FOLDER)/l10n/ui-$(L).json))
+if ENABLE_QTAPP
+# The Qt app page loads the table as its own file (see cool.html.m4). It is
+# not L10N_ALL_JS, which would paste it into the server bundle.js too.
+L10N_JSON += $(DIST_FOLDER)/l10n-all.js $(SETTINGS_L10N_JS)
+endif
 else
 L10N_ALL_JS = $(DIST_FOLDER)/l10n-all.js
-L10N_JSON = $(L10N_ALL_JS)
+L10N_JSON = $(L10N_ALL_JS) $(SETTINGS_L10N_JS)
 L10N_ALL_JS_ENTRY = l10n-all.js
+endif
 
-$(L10N_ALL_JS) : $(wildcard $(srcdir)/po/ui-*.po) $(wildcard $(srcdir)/po/help-*.po) $(UNO_GENERATED_STAMP) $(shell find $(srcdir)/l10n -name '*.*') $(srcdir)/util/create-l10n-all-js.py
+$(DIST_FOLDER)/l10n-all.js : $(wildcard $(srcdir)/po/ui-*.po) $(wildcard $(srcdir)/po/help-*.po) $(UNO_GENERATED_STAMP) $(shell find $(srcdir)/l10n -name '*.*') $(srcdir)/util/create-l10n-all-js.py
 	@for lang in $(L10N_LANGS); do \
-		$(srcdir)/util/po2json.py --quiet $(srcdir)/po/ui-$$lang.po -o $(srcdir)/po/ui-$$lang.po.json || exit 1; \
-		if test -f $(srcdir)/po/help-$$lang.po; then $(srcdir)/util/po2json.py --quiet $(srcdir)/po/help-$$lang.po -o $(srcdir)/po/help-$$lang.po.json || exit 1; fi; \
+		$(PYTHON) $(srcdir)/util/po2json.py --quiet $(srcdir)/po/ui-$$lang.po -o $(srcdir)/po/ui-$$lang.po.json || exit 1; \
+		if test -f $(srcdir)/po/help-$$lang.po; then $(PYTHON) $(srcdir)/util/po2json.py --quiet $(srcdir)/po/help-$$lang.po -o $(srcdir)/po/help-$$lang.po.json || exit 1; fi; \
 	done
 	@mkdir -p $(dir $@)
 	$(PYTHON) $(srcdir)/util/create-l10n-all-js.py >$@
@@ -73,7 +79,6 @@ $(SETTINGS_L10N_JS): \
 		$(srcdir)/util/create-settings-l10n-js.py
 	@mkdir -p $(dir $@)
 	$(PYTHON) $(srcdir)/util/create-settings-l10n-js.py --srcdir $(srcdir) >$@
-endif
 
 QUIET_TSC = $(QUIET_TSC_$(V))
 QUIET_TSC_ = $(QUIET_TSC_$(AM_DEFAULT_VERBOSITY))
@@ -287,6 +292,7 @@ COOL_CSS =\
 	$(srcdir)/css/jssidebar.css \
 	$(srcdir)/css/forced-colors.css \
 	$(srcdir)/css/aichat-sidebar.css \
+	$(srcdir)/css/cleanup-sidebar.css \
 	$(srcdir)/css/extension-sidebar.css \
 	$(srcdir)/css/slideimport.css \
 	$(srcdir)/css/override-smartmenus.css \
@@ -367,7 +373,7 @@ COOL_JS_LST =\
 	src/app/ExportFormats.ts \
 	src/docdispatcher.ts \
 	src/app/TableStylesService.ts \
-	src/app/ImpressTableStylesService.ts \
+	src/app/TableStyleGalleryService.ts \
 	src/core/geometry.ts \
 	src/core/TimerRegistry.ts \
 	src/core/DPIChangeListener.ts \
@@ -404,6 +410,7 @@ COOL_JS_LST =\
 	src/app/Util.ts \
 	src/app/LOUtil.ts \
 	src/app/IconUtil.ts \
+	src/app/SlideAvatars.ts \
 	src/app/iface/DocLayer.Interface.ts \
 	src/app/iface/Map.Interface.ts \
 	src/app/iface/Control.Interface.ts \
@@ -485,23 +492,37 @@ COOL_JS_LST =\
 	src/canvas/vector/primitive/PolyPolygonRGBAPrimitive.ts \
 	src/canvas/vector/primitive/PolyPolygonStrokePrimitive.ts \
 	src/canvas/vector/primitive/FillGradientPrimitive.ts \
+	src/canvas/vector/primitive/FillGraphicAttribute.ts \
+	src/canvas/vector/primitive/FillGraphicPrimitive.ts \
+	src/canvas/vector/primitive/FillHatchPrimitive.ts \
+	src/canvas/vector/primitive/GlowPrimitive.ts \
 	src/canvas/vector/primitive/GradientAttribute.ts \
+	src/canvas/vector/primitive/HatchAttribute.ts \
+	src/canvas/vector/primitive/PatternFillPrimitive.ts \
 	src/canvas/vector/primitive/PolyPolygonAlphaGradientPrimitive.ts \
 	src/canvas/vector/primitive/PolyPolygonGradientPrimitive.ts \
+	src/canvas/vector/primitive/PolyPolygonGraphicPrimitive.ts \
+	src/canvas/vector/primitive/PolyPolygonHatchPrimitive.ts \
+	src/canvas/vector/primitive/ShadowPrimitive.ts \
+	src/canvas/vector/primitive/SoftEdgePrimitive.ts \
+	src/canvas/vector/primitive/TransparencePrimitive.ts \
 	src/canvas/vector/primitive/Primitive.ts \
 	src/canvas/vector/primitive/SingleLinePrimitive.ts \
 	src/canvas/vector/primitive/TextDecoratedPortionPrimitive.ts \
 	src/canvas/vector/primitive/TextSimplePortionPrimitive.ts \
 	src/canvas/vector/primitive/TransformPrimitive.ts \
 	src/canvas/vector/primitive/UnifiedTransparencePrimitive.ts \
+	src/canvas/vector/VectorFillGraphicPrimitiveRenderer.ts \
 	src/canvas/vector/VectorGradientFrame.ts \
 	src/canvas/vector/VectorGradientPrimitiveRenderer.ts \
 	src/canvas/vector/VectorScratchCanvases.ts \
 	src/canvas/vector/VectorResourceWalker.ts \
 	src/canvas/vector/VectorPrimitiveRenderer.ts \
+	src/canvas/vector/VectorHitTest.ts \
 	src/canvas/vector/VectorRenderingConfig.ts \
 	src/canvas/vector/VectorRenderingGraphicsResponse.ts \
 	src/canvas/vector/VectorRenderingFontResponse.ts \
+	src/canvas/vector/VectorPartId.ts \
 	src/canvas/vector/VectorPrimitivesData.ts \
 	src/canvas/vector/VectorPrimitivesResponse.ts \
 	src/canvas/vector/VectorContentSection.ts \
@@ -545,6 +566,7 @@ COOL_JS_LST =\
 	src/layer/vector/CRectangle.ts \
 	src/layer/marker/Cursor.ts \
 	src/layer/vector/CanvasOverlay.ts \
+	src/canvas/sections/RenderGeometrySection.ts \
 	src/canvas/sections/ScrollSection.ts \
 	src/canvas/sections/MouseControl.ts \
 	src/app/LayerUtil.ts \
@@ -692,6 +714,7 @@ COOL_JS_LST =\
 	src/control/jsdialog/Widget.OverflowManager.ts \
 	src/control/jsdialog/Widget.Progressbar.js \
 	src/control/jsdialog/Widget.RadioButton.ts \
+	src/control/jsdialog/Widget.Slider.ts \
 	src/control/jsdialog/Widget.PushButton.ts \
 	src/control/jsdialog/Widget.Comment.ts \
 	src/control/jsdialog/Widget.SpinField.ts \
@@ -724,8 +747,11 @@ COOL_JS_LST =\
 	src/control/Control.NotebookbarBase.ts \
 	src/control/Control.UIManager.ts \
 	src/control/Control.DocumentNameInput.js \
+	src/control/Notebookbar.AIAssistantTab.ts \
 	src/control/Notebookbar.WriterReferencesTab.ts \
 	src/control/Notebookbar.WriterTableTab.ts \
+	src/control/Notebookbar.TableDesignTabBase.ts \
+	src/control/Notebookbar.WriterTableDesignTab.ts \
 	src/control/Control.Notebookbar.js \
 	src/control/Control.NotebookbarWriter.js \
 	src/control/Control.NotebookbarCalc.js \
@@ -746,6 +772,7 @@ COOL_JS_LST =\
 	src/control/Control.BackstageView.ts \
 	src/control/DropFileOverlay.tsx \
 	src/control/AccessibilityNotice.tsx \
+	src/control/UnlockPopup.tsx \
 	src/control/Control.ContextToolbar.ts \
 	src/control/Control.SidebarBase.ts \
 	src/control/Control.Sidebar.ts \
@@ -754,6 +781,7 @@ COOL_JS_LST =\
 	src/control/Notebookbar.ImpressTableDesignTab.ts \
 	src/control/Notebookbar.ImpressTransitionTab.ts \
 	src/control/Sidebar.FromNotebookbarPanel.ts \
+	src/control/Control.CleanupSidebar.ts \
 	src/control/Control.NavigatorPanel.ts \
 	src/control/Control.QuickFindPanel.ts \
 	src/control/Control.NotesPanel.ts \
@@ -773,6 +801,7 @@ COOL_JS_LST =\
 	src/control/VRuler.ts \
 	src/control/HRuler.ts \
 	src/control/PermissionMode.ts \
+	src/control/ViewState.ts \
 	src/slideshow/SlideCache.ts \
 	src/slideshow/SlideCompositor.ts \
 	src/slideshow/LayerRenderer.ts \
@@ -1049,9 +1078,9 @@ if ENABLE_WASM_FALLBACK
 WASM_FALLBACK_FILES += $(DIST_FOLDER)/wasm
 endif
 
-QTAPP_TABSTRIP_FILES =
-if ENABLE_QTAPP
-QTAPP_TABSTRIP_FILES += \
+TABSTRIP_FILES =
+if ENABLE_TABSTRIP
+TABSTRIP_FILES += \
 	$(DIST_FOLDER)/qtapp-tabstrip.html \
 	$(DIST_FOLDER)/qtapp-tabstrip.css \
 	$(DIST_FOLDER)/qtapp-tabstrip.js
@@ -1073,7 +1102,6 @@ build-cool: \
 	$(L10N_MAPS_STAMP) \
 	$(UNO_L10N_STAMP) \
 	$(L10N_JSON) \
-	$(SETTINGS_L10N_JS) \
 	$(COOL_IMAGES_DST) \
 	$(COOL_IMAGES_CUSTOM_DST) \
 	$(JQUERY_LIGHTNESS_DIST_IMAGES) \
@@ -1089,7 +1117,8 @@ build-cool: \
 	$(DIST_FOLDER)/color-palette-dark.css \
 	$(DIST_FOLDER)/bundle.js \
 	$(DIST_FOLDER)/cool.html \
-	$(QTAPP_TABSTRIP_FILES) \
+	$(DIST_FOLDER)/cool-preview.html \
+	$(TABSTRIP_FILES) \
 	$(COOL_QT_HTML) \
 	$(WASM_FILES) \
 	$(WASM_FALLBACK_FILES) \
@@ -1170,7 +1199,7 @@ prettier.done: $(COOL_JS_SRC) $(COOL_TS_SRC) $(COOL_TSX_SRC)
 # depend on it.
 $(srcdir)/l10n/localizations.json: $(abs_top_srcdir)/scripts/genlangmaps.py $(wildcard $(LANGS_CONF)) \
 		$(wildcard $(srcdir)/po/ui-*.po) $(wildcard $(srcdir)/po/help-*.po)
-	$(QUIET_GENLANGMAPS) test ! -f "$(LANGS_CONF)" || $(abs_top_srcdir)/scripts/genlangmaps.py $(abs_top_srcdir) $(ENGINE_SRCDIR)
+	$(QUIET_GENLANGMAPS) test ! -f "$(LANGS_CONF)" || $(PYTHON) $(abs_top_srcdir)/scripts/genlangmaps.py $(abs_top_srcdir) $(ENGINE_SRCDIR)
 
 # The same run wrote these two, so they are up to date once it has run.
 $(srcdir)/l10n/help-localizations.json $(srcdir)/l10n/uno-localizations.json: $(srcdir)/l10n/localizations.json
@@ -1191,11 +1220,11 @@ $(srcdir)/src/unocommands.js: $(abs_top_srcdir)/scripts/unocommands.py \
 		$(wildcard $(ENGINE_UI_XCU_DIR)/*.xcu) \
 		$(wildcard $(srcdir)/src/control/*.js $(srcdir)/src/control/*.ts \
 			$(srcdir)/src/control/jsdialog/*.js $(srcdir)/src/control/jsdialog/*.ts)
-	$(QUIET_UNOCOMMANDS) test ! -d "$(ENGINE_UI_XCU_DIR)" || $(abs_top_srcdir)/scripts/unocommands.py --update $(abs_top_srcdir) $(ENGINE_SRCDIR)
+	$(QUIET_UNOCOMMANDS) test ! -d "$(ENGINE_UI_XCU_DIR)" || $(PYTHON) $(abs_top_srcdir)/scripts/unocommands.py --update $(abs_top_srcdir) $(ENGINE_SRCDIR)
 
 $(UNO_GENERATED_STAMP): $(abs_top_srcdir)/scripts/unocommands.py $(L10N_MAPS_STAMP) $(srcdir)/src/unocommands.js \
 		$(wildcard $(ENGINE_SRCDIR)/translations/source/*/officecfg/registry/data/org/openoffice/Office/UI.po)
-	$(QUIET_UNOCOMMANDS) test ! -d "$(ENGINE_UI_XCU_DIR)" || $(abs_top_srcdir)/scripts/unocommands.py --translate $(abs_top_srcdir) $(ENGINE_SRCDIR)/translations
+	$(QUIET_UNOCOMMANDS) test ! -d "$(ENGINE_UI_XCU_DIR)" || $(PYTHON) $(abs_top_srcdir)/scripts/unocommands.py --translate $(abs_top_srcdir) $(ENGINE_SRCDIR)/translations
 	@mkdir -p $(dir $@)
 	@touch $@
 
@@ -1213,7 +1242,7 @@ $(UNO_L10N_STAMP): $(UNO_GENERATED_STAMP)
 $(srcdir)/src/unoshortcuts.ts: $(abs_top_srcdir)/scripts/unoshortcuts.py \
 		$(wildcard $(ENGINE_SRCDIR)/officecfg/registry/data/org/openoffice/Office/Accelerators.xcu) \
 		$(wildcard $(ENGINE_SRCDIR)/vcl/unx/generic/app/keysymnames.cxx)
-	$(QUIET_UNOSHORTCUTS) test ! -d "$(ENGINE_UI_XCU_DIR)" || $(abs_top_srcdir)/scripts/unoshortcuts.py --update $(abs_top_srcdir) $(ENGINE_SRCDIR)
+	$(QUIET_UNOSHORTCUTS) test ! -d "$(ENGINE_UI_XCU_DIR)" || $(PYTHON) $(abs_top_srcdir)/scripts/unoshortcuts.py --update $(abs_top_srcdir) $(ENGINE_SRCDIR)
 
 $(INTERMEDIATE_DIR)/cool-src.js: tscompile.done $(call prereq_cool) $(COOL_JS_DST) $(srcdir)/src/unocommands.js $(abs_top_srcdir)/scripts/unocommands.py $(srcdir)/cool-src.js.m4
 	@mkdir -p $(dir $@)
@@ -1285,7 +1314,12 @@ $(DIST_FOLDER)/cool-qt.html: $(cool_html_prereqs) | $(DIST_FOLDER)/bundle.js
 	$(QUIET_M4) m4 $(cool_html_defines) -DQTAPP=true \
 		$(srcdir)/html/cool.html.m4 > $@
 
-if ENABLE_QTAPP
+# cool-preview.html is for the interactive preview. It defines PREVIEW.
+$(DIST_FOLDER)/cool-preview.html: $(cool_html_prereqs) | $(DIST_FOLDER)/bundle.js
+	$(QUIET_M4) m4 $(cool_html_defines) -DQTAPP=false -DPREVIEW=true \
+		$(srcdir)/html/cool.html.m4 > $@
+
+if ENABLE_TABSTRIP
 $(DIST_FOLDER)/qtapp-tabstrip.html: $(srcdir)/html/qtapp-tabstrip.html.m4
 	@mkdir -p $(DIST_FOLDER)
 	$(QUIET_M4) m4 -PE -I $(INTERMEDIATE_DIR) \
@@ -1399,7 +1433,6 @@ $(DIST_FOLDER)/extensions/%: $(srcdir)/extensions/%
 
 if ENABLE_DEBUG
 install-demo-extensions:
-	ids= && \
 	for dir in $(srcdir)/extensions/*/; do \
 		id=$$(basename $$dir) && \
 		if test -f "$$dir/manifest.json"; then \
@@ -1410,34 +1443,13 @@ install-demo-extensions:
 				test -f "$$po" || continue; \
 				lang=$$(basename "$$po" .po) && \
 				mkdir -p $(DIST_FOLDER)/extensions/$$id/l10n && \
-				$(srcdir)/util/po2json.py --quiet "$$po" -o $(DIST_FOLDER)/extensions/$$id/l10n/$$lang.json || exit 1; \
-			done && \
-			ids="$$ids$${ids:+,}\"$$id\""; \
+				$(PYTHON) $(srcdir)/util/po2json.py --quiet "$$po" -o $(DIST_FOLDER)/extensions/$$id/l10n/$$lang.json || exit 1; \
+			done; \
 		elif test -f "$$dir/appsscript.json"; then \
 			mkdir -p $(DIST_FOLDER)/extensions/$$id && \
-			cp -r $$dir/. $(DIST_FOLDER)/extensions/$$id/ && \
-			if test "$(ENABLE_MOBILEAPP)" = true || test "$(ENABLE_QTAPP)" = true; then \
-				scripts= && \
-				for gs in "$$dir"/*.gs; do \
-					test -f "$$gs" || continue; \
-					name=$$(basename "$$gs") && \
-					scripts="$$scripts$${scripts:+,}\"$$name\""; \
-				done && \
-				sidebar= && \
-				for html in "$$dir"/*.html; do \
-					test -f "$$html" || continue; \
-					sidebar=$$(basename "$$html") && \
-					break; \
-				done && \
-				printf '{"scripts":[%s],"sidebar":"%s"}\n' "$$scripts" "$$sidebar" \
-					> $(DIST_FOLDER)/extensions/$$id/_cool-gas.json; \
-			fi && \
-			ids="$$ids$${ids:+,}\"$$id\""; \
+			cp -r $$dir/. $(DIST_FOLDER)/extensions/$$id/; \
 		fi; \
-	done && \
-	if test "$(ENABLE_MOBILEAPP)" = true || test "$(ENABLE_QTAPP)" = true; then \
-		printf '[%s]\n' "$$ids" > $(DIST_FOLDER)/extensions/index.json; \
-	fi
+	done
 endif
 
 # tsc must compile the .js sources so TypeScript can resolve globals defined in
@@ -1495,10 +1507,10 @@ $(DIST_FOLDER)/images/%.png: $(JQUERY_MINIFIED_IMAGE_PATH)/%.png
 	@cp $< $@
 
 $(DIST_FOLDER)/l10n/help-%.json: $(srcdir)/po/help-%.po
-	@$(srcdir)/util/po2json.py --quiet $< -o $@
+	@$(PYTHON) $(srcdir)/util/po2json.py --quiet $< -o $@
 
 $(DIST_FOLDER)/l10n/ui-%.json: $(srcdir)/po/ui-%.po
-	@$(srcdir)/util/po2json.py --quiet $< -o $@
+	@$(PYTHON) $(srcdir)/util/po2json.py --quiet $< -o $@
 
 $(DIST_FOLDER)/admin/%: $(srcdir)/admin/%
 	@mkdir -p $(dir $@)
@@ -1572,9 +1584,10 @@ pot:
 		src/app/Debug.ts \
 		src/app/ExportFormats.ts \
 		src/app/IconUtil.ts \
+		src/app/SlideAvatars.ts \
 		src/app/LOUtil.ts \
 		src/app/TableStylesService.ts \
-		src/app/ImpressTableStylesService.ts \
+		src/app/TableStyleGalleryService.ts \
 		src/canvas/sections/CommentListSection.ts \
 		src/canvas/sections/CommentSection.ts \
 		src/canvas/sections/CompareChangesLabelSection.ts \
@@ -1595,6 +1608,7 @@ pot:
 		src/control/Control.AboutDialog.ts \
 		src/control/Control.AddressInputField.ts \
 		src/control/Control.AIChatSidebar.ts \
+		src/control/Control.CleanupSidebar.ts \
 		src/control/Control.AlertDialog.js \
 		src/control/Control.BackstageView.ts \
 		src/control/backstage/CloudProviderKinds.ts \
@@ -1626,12 +1640,15 @@ pot:
 		src/control/Control.MobileWizardBuilder.js \
 		src/control/Control.NavigatorPanel.ts \
 		src/control/Control.QuickFindPanel.ts \
+		src/control/Notebookbar.AIAssistantTab.ts \
 		src/control/Notebookbar.CalcTableTab.ts \
 		src/control/Notebookbar.ImpressAnimationTab.ts \
 		src/control/Notebookbar.ImpressTableDesignTab.ts \
 		src/control/Notebookbar.ImpressTransitionTab.ts \
+		src/control/Notebookbar.TableDesignTabBase.ts \
 		src/control/Notebookbar.WriterReferencesTab.ts \
 		src/control/Notebookbar.WriterTableTab.ts \
+		src/control/Notebookbar.WriterTableDesignTab.ts \
 		src/control/Sidebar.FromNotebookbarPanel.ts \
 		src/control/Control.Notebookbar.js \
 		src/control/Control.NotebookbarBase.ts \
@@ -1735,7 +1752,7 @@ pot:
 		test -f "$$dir/manifest.json" || continue; \
 		$(PYTHON) util/extension-pot.py "$$dir" || exit 1; \
 	done
-	$(srcdir)/util/appendwelcome.py po/templates/welcome.pot po/templates/cool-ui.pot
+	$(PYTHON) $(srcdir)/util/appendwelcome.py po/templates/welcome.pot po/templates/cool-ui.pot
 	rm po/templates/welcome.pot
 	msguniq -w 78 -t UTF-8 po/templates/cool-ui.pot > po/templates/cool-ui.pot.new; mv po/templates/cool-ui.pot.new po/templates/cool-ui.pot
 

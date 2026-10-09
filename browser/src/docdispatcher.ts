@@ -664,24 +664,53 @@ class Dispatcher {
 	}
 
 	private addAICommands() {
-		this.actionsMap['aichat'] = function () {
-			if (!app.map.isAIConfigured) {
-				Dispatcher.openAISetup();
-				return;
-			}
-			const sidebar = JSDialog.getAIChatSidebar();
-			sidebar.toggle();
+		// None of these can answer without a provider, so an unconfigured user
+		// gets the setup path instead of a sidebar that cannot reply.
+		const requireAIProvider = (run: (sidebar: any) => void) => {
+			return function () {
+				if (!app.map.isAIConfigured) {
+					Dispatcher.openAISetup();
+					return;
+				}
+				run(JSDialog.getAIChatSidebar());
+			};
 		};
 
-		this.actionsMap['helpfixformulaerror'] = function () {
-			if (!app.map.isAIConfigured) {
-				Dispatcher.openAISetup();
-				return;
-			}
-			const sidebar = JSDialog.getAIChatSidebar();
+		this.actionsMap['aichat'] = requireAIProvider((sidebar) =>
+			sidebar.toggle(),
+		);
+
+		this.actionsMap['helpfixformulaerror'] = requireAIProvider((sidebar) => {
 			if (!sidebar.isVisible()) sidebar.show();
 			sidebar.diagnoseFormulaError();
-		};
+		});
+
+		for (const action of JSDialog.AIAssistantTab?.getQuickActions() ?? []) {
+			if (!action.prompt) continue;
+			this.actionsMap['aichatquick-' + action.id] = requireAIProvider(
+				(sidebar) => sidebar.runOnSelection(action.prompt),
+			);
+		}
+
+		this.actionsMap['aichatcreateslides'] = requireAIProvider((sidebar) =>
+			sidebar.createSlides(),
+		);
+
+		this.actionsMap['aichatgenerateimage'] = requireAIProvider((sidebar) =>
+			sidebar.generateImage(),
+		);
+
+		this.actionsMap['aichatspeakernotes'] = requireAIProvider((sidebar) =>
+			sidebar.generateSpeakerNotes(),
+		);
+
+		this.actionsMap['aichatcreateformula'] = requireAIProvider((sidebar) =>
+			sidebar.createFormula(),
+		);
+
+		this.actionsMap['aichatcleanupdata'] = requireAIProvider((sidebar) =>
+			sidebar.sanityCheckData(),
+		);
 	}
 
 	private addExportCommands() {
@@ -921,21 +950,50 @@ class Dispatcher {
 		};
 
 		this.actionsMap['deletepage'] = function () {
+			const count = app.impress.getSelectedSlidesCount();
+			const sectionName = app.impress.getSelectedSectionName();
+			if (!sectionName && count <= 1) {
+				app.map.deletePage();
+				return;
+			}
+
+			let title: string;
 			let msg: string;
 			if (app.map.getDocType() === 'presentation') {
-				msg = _('Are you sure you want to delete this slide?');
+				if (sectionName) {
+					title = _('Delete section');
+					msg = _n(
+						'Delete section "%1" and its %n slide?',
+						'Delete section "%1" and its %n slides?',
+						count,
+					).replace('%1', sectionName);
+				} else {
+					title = _('Delete slides');
+					msg = _n('Delete %n slide?', 'Delete %n slides?', count);
+				}
 			} else {
 				/* drawing */
-				msg = _('Are you sure you want to delete this page?');
+				title = _('Delete pages');
+				msg = _n('Delete %n page?', 'Delete %n pages?', count);
 			}
+			const fromSlideSorter = app.map.keyboard._slideSorterFocused();
 			app.map.uiManager.showInfoModal(
 				'deleteslide-modal',
-				_('Delete'),
+				title,
 				msg,
 				'',
-				_('OK'),
+				_('Delete'),
 				function () {
 					app.map.deletePage();
+					if (!fromSlideSorter) return false;
+
+					// The dialog puts its focus back in a layouting task, so this task runs after it.
+					const uiManager = app.map.uiManager;
+					uiManager.closeModal(uiManager.generateModalId('deleteslide-modal'));
+					app.layoutingService.appendLayoutingTask(() => {
+						app.map._docLayer._preview.focusCurrentSlide();
+					});
+					return true;
 				},
 				true,
 				'deleteslide-modal-response',
@@ -956,6 +1014,10 @@ class Dispatcher {
 			if (app.file.fileBasedView)
 				app.map._docLayer._preview._scrollViewByDirection('next');
 			else app.map.setPart('next');
+		};
+
+		this.actionsMap['selectallslides'] = function () {
+			app.map._docLayer._preview._selectAllParts();
 		};
 
 		this.actionsMap['lastpart'] = function () {
@@ -987,28 +1049,25 @@ class Dispatcher {
 
 		this.actionsMap['leftpara'] = function () {
 			app.map.sendUnoCommand(
-				(window as any).getUNOCommand({
+				window.getUNOCommand({
 					textCommand: '.uno:LeftPara',
 					objectCommand: '.uno:ObjectAlignLeft',
-					unosheet: '.uno:AlignLeft',
 				}),
 			);
 		};
 		this.actionsMap['centerpara'] = function () {
 			app.map.sendUnoCommand(
-				(window as any).getUNOCommand({
+				window.getUNOCommand({
 					textCommand: '.uno:CenterPara',
 					objectCommand: '.uno:AlignCenter',
-					unosheet: '.uno:AlignHorizontalCenter',
 				}),
 			);
 		};
 		this.actionsMap['rightpara'] = function () {
 			app.map.sendUnoCommand(
-				(window as any).getUNOCommand({
+				window.getUNOCommand({
 					textCommand: '.uno:RightPara',
 					objectCommand: '.uno:ObjectAlignRight',
-					unosheet: '.uno:AlignRight',
 				}),
 			);
 		};
@@ -1074,6 +1133,10 @@ class Dispatcher {
 
 		this.actionsMap['transitiondeck'] = () => {
 			app.map.sidebarFromNotebookbar.toggleTransitionsSidebar();
+		};
+
+		this.actionsMap['cleanupdeck'] = () => {
+			app.map.cleanupSidebar.toggle();
 		};
 	}
 
@@ -1342,7 +1405,6 @@ class Dispatcher {
 			const configuration = window as any;
 			if (configuration.mobileWizard) {
 				configuration.mobileWizard = false;
-				app.map.sendUnoCommand('.uno:SidebarHide');
 				app.map.fire('closemobilewizard');
 				app.map.mobileTopBar.selectItem('mobile_wizard', false);
 			} else {
@@ -1376,12 +1438,12 @@ class Dispatcher {
 
 		this.actionsMap['fontcolor'] = () => {
 			app.map.fire('mobilewizard', {
-				data: (window as any).getColorPickerData('Font Color'),
+				data: window.getColorPickerData('Font Color'),
 			});
 		};
 		this.actionsMap['backcolor'] = () => {
 			app.map.fire('mobilewizard', {
-				data: (window as any).getColorPickerData('Highlight Color'),
+				data: window.getColorPickerData('Highlight Color'),
 			});
 		};
 		// TODO: leftover from mobile bottom bar
@@ -1398,6 +1460,9 @@ class Dispatcher {
 
 	/// optional docType specifies which commands should we load
 	constructor(docType: string = undefined) {
+		if (window.mode.isInteractivePreview()) {
+			return;
+		}
 		docType = docType ? docType : app.map._docLayer._docType;
 
 		this.addGeneralCommands();
@@ -1503,6 +1568,11 @@ class Dispatcher {
 			return;
 		}
 
+		if (action === '.uno:DeletePage') {
+			this.actionsMap['deletepage']();
+			return;
+		}
+
 		if (this.actionsMap[action] !== undefined) {
 			this.actionsMap[action](data);
 			return;
@@ -1522,6 +1592,10 @@ class Dispatcher {
 			return;
 		}
 
+		if (window.mode.isInteractivePreview()) {
+			// No need to alert anyone here.
+			return;
+		}
 		console.error('unknown dispatch: "' + action + '"');
 	}
 }

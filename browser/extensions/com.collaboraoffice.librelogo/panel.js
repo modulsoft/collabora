@@ -463,11 +463,16 @@ class Panel {
 
 	async saveToDocument() {
 		const text = $('editor').value;
-		if (!text.trim()) return;
+		if (!text.trim()) {
+			this.log('info', cool._('The editor is empty, so there is no program to write to the document.'));
+			return;
+		}
 		try {
 			await window.cool.callRemote(function (program) {
 				const doc = cool.getActiveDocument();
-				doc.getCursor().insertText(program);
+				const selection = doc.getSelection();
+				if (selection) selection.replace(program);
+				else doc.getCursor().insertText(program);
 			}, text);
 			this.log('info', cool._('Program written to the document.'));
 		} catch (e) {

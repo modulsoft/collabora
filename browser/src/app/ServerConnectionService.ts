@@ -37,7 +37,7 @@ class ServerConnectionService {
 		app.console.debug('ServerConnectionService: onBasicUI');
 
 		app.tableStyles = new TableStylesService();
-		app.impressTableStyles = new ImpressTableStylesService();
+		app.tableStyleGallery = new TableStyleGalleryService();
 	}
 
 	public onWopiProps(props: {
@@ -52,9 +52,26 @@ class ServerConnectionService {
 			return;
 		}
 
-		app.map.isAIConfigured = !!props.AIConfigured;
+		this.setAIConfigured(!!props.AIConfigured);
 		app.map.aiModelName = props.AIModelName || '';
 		app.map.aiEthicalRating = props.AIEthicalRating || 'U';
+
+		// Whether AI is configured decides whether the AI Assistant opens with
+		// the document. This may land before or after the load, so both sides
+		// call in and the later one acts.
+		app.map.uiManager.initializeAIAssistant();
+	}
+
+	// The AI entry points are gated on a configured provider, so the
+	// notebookbar has to be rebuilt whenever that changes.
+	private setAIConfigured(configured: boolean) {
+		// Undefined until the first reply lands, so compare as a boolean.
+		if (!!app.map.isAIConfigured === configured) return;
+		app.map.isAIConfigured = configured;
+		// Until the document layer exists the notebookbar cannot tell its
+		// document type, and would rebuild the tab empty; initializeAIAssistant()
+		// does the rebuild once it can.
+		if (app.map.getDocType()) app.map.uiManager?.notebookbar?.impl?.refresh();
 	}
 
 	public onViewSetting(viewSetting: ViewSetting) {
@@ -73,12 +90,14 @@ class ServerConnectionService {
 		app.impress.savedViewMode = viewSetting.presentationViewMode ?? null;
 		app.writer.savedViewMode = viewSetting.presentationViewMode ?? null;
 
-		app.map.isAIConfigured = !!viewSetting.aiConfigured;
+		this.setAIConfigured(!!viewSetting.aiConfigured);
 		app.map.aiRequestTimeout = viewSetting.aiRequestTimeout
 			? Math.max(10, Number(viewSetting.aiRequestTimeout))
 			: 300;
 		app.map.aiModelName = viewSetting.aiModelName || '';
 		app.map.aiEthicalRating = viewSetting.aiEthicalRating || 'U';
+
+		app.map.uiManager.initializeAIAssistant();
 
 		// The user just changed the AI provider from the settings dialog. Now
 		// that isAIConfigured / aiModelName / aiEthicalRating reflect the new
@@ -89,23 +108,13 @@ class ServerConnectionService {
 				// On the desktop apps the Options dialog opens over the
 				// backstage, which covers the document. Close the backstage
 				// first so the user lands back on the document and sees the
-				// View tab and the AI sidebar.
+				// AI entry point and the AI sidebar.
 				if (app.map.backstageView) app.map.backstageView.hide();
 				const sidebar = JSDialog.getAIChatSidebar();
 				if (sidebar.isVisible()) {
 					sidebar.refreshModelAndRating();
 				} else {
-					// A click on the already-selected tab of an expanded
-					// notebookbar collapses the bar, so click only when it
-					// switches to the View tab or re-expands a collapsed bar.
-					const viewTab = document.getElementById('View-tab-label');
-					if (
-						viewTab &&
-						(!viewTab.classList.contains('selected') ||
-							app.map.uiManager.isNotebookbarCollapsed())
-					) {
-						viewTab.click();
-					}
+					app.map.uiManager.selectAIAssistantTab();
 					sidebar.show();
 				}
 			}
@@ -186,7 +195,10 @@ class ServerConnectionService {
 	public onVisualsReady() {
 		app.console.debug('ServerConnectionService: onVisualsReady');
 
-		if (!window.mode.isSmallScreenDevice()) {
+		if (
+			!window.mode.isSmallScreenDevice() &&
+			!window.mode.isInteractivePreview()
+		) {
 			// show zotero items if needed
 			const zoteroItems = [
 				'zoteroaddeditbibliography',
@@ -210,7 +222,9 @@ class ServerConnectionService {
 		}
 
 		// initialize notebookbar in core
-		app.map.uiManager.initializeLateComponents();
+		if (!window.mode.isInteractivePreview()) {
+			app.map.uiManager.initializeLateComponents();
+		}
 		JSDialog.RefreshScrollables();
 	}
 

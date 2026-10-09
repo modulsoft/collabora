@@ -88,6 +88,33 @@ namespace net
     /// Send each packet on a real socket as soon as it is ready, without waiting to aggregate
     /// several of them.
     void disableNagleAlgorithm(int descriptor);
+
+    /// True when accept failed for a reason that leaves the listening socket unusable, as opposed
+    /// to one worth retrying. Logs either way.
+    bool isUnrecoverableAcceptError(int cause);
+
+
+    /// Close a descriptor that came from this build's socket layer, which is a real socket in the
+    /// server and a fake one in the app.
+    inline void closeSocketDescriptor(int descriptor)
+    {
+        if (!Util::isMobileApp())
+            closeDescriptor(descriptor);
+        else
+            fakeSocketClose(descriptor);
+    }
+
+    /// Read from a descriptor that has a real pipe or socket underneath. Returns the number of
+    /// bytes read, or -1 with errno set.
+    ssize_t readDescriptor(int descriptor, void* buffer, std::size_t length);
+
+    /// Create a real pipe whose two descriptors are non-blocking and are closed when a new
+    /// program starts. Returns 0, or -1 with errno set.
+    int createPipe(int descriptors[2]);
+
+    /// Wait until one of the real descriptors is ready, for at most the given number of
+    /// microseconds. Returns how many are ready, 0 when the time ran out, or -1 with errno set.
+    int pollDescriptors(struct pollfd* descriptors, std::size_t count, int64_t timeoutMicroseconds);
 }
 
 class Socket;
@@ -452,10 +479,7 @@ private:
             return;
 
             // Doesn't block on sockets; no error handling needed.
-        if (Util::isMobileApp())
-            fakeSocketClose(_fd);
-        else
-            net::closeDescriptor(_fd);
+        net::closeSocketDescriptor(_fd);
 
         LOG_DBG("Closed socket " << toStringImpl()); // Should be logged exactly once.
 
@@ -510,6 +534,38 @@ private:
 };
 
 inline std::ostream& operator<<(std::ostream& os, const Socket &s) { return s.stream(os); }
+
+namespace net
+{
+    /// Open a real stream socket of the given kind, non-blocking and closed when a new program
+    /// starts. Returns the descriptor, or -1 with errno set.
+    int openStreamSocket(Socket::Type type);
+
+    /// Give a real socket the given port, on every address when publicly is true and on the
+    /// loopback address otherwise. Returns true on success only.
+    bool bindToPort(int descriptor, Socket::Type socketType, bool publicly, int port);
+
+    /// The port a bound socket has, in host byte order, or -1 when it cannot be read.
+    int boundPort(int descriptor);
+
+    /// Where a connection came from.
+    struct PeerAddress
+    {
+        /// The kind of socket the connection arrived on.
+        Socket::Type type = Socket::Type::All;
+        /// The address in its printable form, empty when the platform could not render it.
+        std::string address;
+        /// The port, in host byte order.
+        unsigned int port = 0;
+        /// The address family the platform reported.
+        int family = 0;
+    };
+
+    /// Take a waiting connection from a real listening socket and fill in where it came from.
+    /// Returns the descriptor, -1 when there is nothing to take, and stops the process when the
+    /// listening socket is unusable.
+    int acceptConnection(int descriptor, PeerAddress& peer);
+}
 
 class StreamSocket;
 class MessageHandlerInterface;
@@ -1741,6 +1797,7 @@ public:
         setLastSeenTime(now);
 
         bool closed = (events & (POLLHUP | POLLERR | POLLNVAL));
+        bool unreadAfterHangup = false;
 
         if (events & POLLIN)
         {
@@ -1775,6 +1832,7 @@ public:
                 LOG_DBG("Ignoring POLLHUP to drain incoming data as we had POLLIN but got "
                         << Util::symbolicErrno(last_errno) << " on read");
                 closed = false;
+                unreadAfterHangup = true;
             }
             else if (read == 0 || (read < 0 && (last_errno == EPIPE || last_errno == ECONNRESET)))
             {
@@ -1845,7 +1903,8 @@ public:
                         LOG_DBG("Disconnected while writing (" << Util::symbolicErrno(last_errno)
                                                                << "): " << std::strerror(last_errno)
                                                                << ')');
-                        closed = true;
+                        // Input still unread is handled on the next poll, which then closes.
+                        closed = !unreadAfterHangup;
                         break;
                     }
                 }

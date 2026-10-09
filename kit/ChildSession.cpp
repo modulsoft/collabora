@@ -18,6 +18,12 @@
 
 #include "ChildSession.hpp"
 
+#include <common/Common.hpp>
+
+#if APP_HAS_SETTINGS_STORE
+#include <common/SettingsStorage.hpp>
+#endif
+
 #include <common/Anonymizer.hpp>
 #include <common/Clipboard.hpp>
 #include <common/CommandControl.hpp>
@@ -39,6 +45,7 @@
 
 #include <COKit/COKit.hxx>
 
+#include <Poco/Path.h>
 #include <Poco/StreamCopier.h>
 #include <Poco/URI.h>
 #include <Poco/BinaryReader.h>
@@ -67,6 +74,7 @@
 #include <climits>
 #include <fstream>
 #include <cctype>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -563,7 +571,14 @@ bool ChildSession::_handleInput(const char *buffer, int length)
     }
     else if (tokens.equals(0, "addconfig"))
     {
+#if APP_HAS_SETTINGS_STORE
+        // No jail to stage into, and no need of one: the engine reads the
+        // configuration out of the user's own profile, which is where the
+        // settings dialog writes it.
+        const Poco::Path presetsPath(Desktop::getUserConfigRoot());
+#else
         const Poco::Path presetsPath(getJailRoot() + JAILED_CONFIG_ROOT);
+#endif
         getLOKit()->setOption("addconfig", Poco::URI(presetsPath).toString().c_str());
     }
     else if (tokens.equals(0, "userpersistence"))
@@ -636,6 +651,7 @@ bool ChildSession::_handleInput(const char *buffer, int length)
                tokens.equals(0, "clientzoom") ||
                tokens.equals(0, "clientvisiblearea") ||
                tokens.equals(0, "outlinestate") ||
+               tokens.equals(0, "reportmousepointer") ||
                tokens.equals(0, "downloadas") ||
                tokens.equals(0, "getchildid") ||
                tokens.equals(0, "gettextselection") ||
@@ -696,6 +712,10 @@ bool ChildSession::_handleInput(const char *buffer, int length)
         else if (tokens.equals(0, "outlinestate"))
         {
             return outlineState(tokens);
+        }
+        else if (tokens.equals(0, "reportmousepointer"))
+        {
+            return reportMousePointer(tokens);
         }
         else if (tokens.equals(0, "downloadas"))
         {
@@ -1090,30 +1110,168 @@ namespace {
     }
 }
 
+void ChildSession::parseLoadCommand(const StringVector& tokens, std::string& part)
+{
+    for (std::size_t i = 1; i < tokens.size(); ++i)
+    {
+        std::string name;
+        std::string value;
+        if (!COOLProtocol::parseNameValuePair(tokens[i], name, value))
+        {
+            LOG_WRN("Unexpected load token [" << tokens[i] << "]. Skipping.");
+            continue;
+        }
+
+        if (name == "jail")
+        {
+            _jailedFilePath = std::move(value);
+        }
+        else if (name == "xjail")
+        {
+            _jailedFilePathAnonym = std::move(value);
+        }
+        else if (name == "authorid")
+        {
+            _userId = Uri::decode(value);
+        }
+        else if (name == "xauthorid")
+        {
+            _userIdAnonym = Uri::decode(value);
+        }
+        else if (name == "author")
+        {
+            _userName = Uri::decode(value);
+        }
+        else if (name == "xauthor")
+        {
+            _userNameAnonym = Uri::decode(value);
+        }
+        else if (name == "authorextrainfo")
+        {
+            _userExtraInfo = Uri::decode(value);
+        }
+        else if (name == "authorprivateinfo")
+        {
+            _userPrivateInfo = Uri::decode(value);
+        }
+        else if (name == "signatureconfig")
+        {
+            if (_userPrivateInfo.empty())
+            {
+                LOG_WRN(
+                    "signatureconfig: User private info not set, skipping signature configuration");
+                continue;
+            }
+
+            const std::string decodedSignatureData = Uri::decode(value);
+            if (decodedSignatureData == "{}")
+            {
+                LOG_INF("signatureconfig: Empty signature data received, skipping processing");
+                continue;
+            }
+
+            Poco::JSON::Object::Ptr signatureDataObject;
+            if (!JsonUtil::parseJSON(decodedSignatureData, signatureDataObject))
+            {
+                LOG_ERR("signatureconfig: Failed to parse signature data as JSON: "
+                        << decodedSignatureData);
+                continue;
+            }
+
+            Poco::JSON::Object::Ptr userPrivateInfoObject;
+            if (!JsonUtil::parseJSON(_userPrivateInfo, userPrivateInfoObject))
+            {
+                LOG_ERR("signatureconfig: Failed to parse user private info as JSON: "
+                        << _userPrivateInfo);
+                continue;
+            }
+
+            setSignToUserPrivateConfig("SignatureCert", signatureDataObject,
+                                       userPrivateInfoObject);
+            setSignToUserPrivateConfig("SignatureKey", signatureDataObject,
+                                       userPrivateInfoObject);
+            setSignToUserPrivateConfig("SignatureCa", signatureDataObject,
+                                       userPrivateInfoObject);
+
+            _userPrivateInfo = JsonUtil::jsonToString(userPrivateInfoObject);
+            LOG_INF("signatureconfig: Successfully updated user private info with signature data");
+        }
+        else if (name == "serverprivateinfo")
+        {
+            _serverPrivateInfo = Uri::decode(value);
+        }
+        else if (name == "readonly")
+        {
+            _isReadOnly = value != "0";
+        }
+        else if (name == "isAllowChangeComments")
+        {
+            _isAllowChangeComments = value == "true";
+        }
+        else if (name == "isAllowManageRedlines")
+        {
+            _isAllowManageRedlines = value == "true";
+        }
+        else if (name == "watermarkText")
+        {
+            _watermarkText = Uri::decode(value);
+        }
+        else if (name == "watermarkOpacity")
+        {
+            _watermarkOpacity = std::stod(value);
+        }
+        else if (name == "template")
+        {
+            _docTemplate = std::move(value);
+        }
+        else if (name == "enableMacrosExecution")
+        {
+            _enableMacrosExecution = std::move(value);
+        }
+        else if (name == "macroSecurityLevel")
+        {
+            _macroSecurityLevel = std::move(value);
+        }
+        else if (name == "originaldocumenturl")
+        {
+            _originalDocUrl = std::move(value);
+        }
+        else if (name == "verifyHost")
+        {
+            _disableVerifyHost = value == "false";
+        }
+        else if (name == "infilterOptions")
+        {
+            _inFilterOptions = std::move(value);
+        }
+        else if (!applyBrowserLoadOption(name, value, part))
+        {
+            LOG_WRN("Ignoring the unknown load option [" << name << ']');
+        }
+    }
+
+    if (Anonymizer::enabled())
+    {
+        Anonymizer::mapAnonymized(_userId, _userIdAnonym);
+        Anonymizer::mapAnonymized(_userName, _userNameAnonym);
+        Anonymizer::mapAnonymized(_jailedFilePath, _jailedFilePathAnonym);
+    }
+
+    disableSpellCheckIfReadOnly();
+}
+
 bool ChildSession::loadDocument(const StringVector& tokens)
 {
     KitLoadTimings.record("loadDocumentStart");
 
-    int part = -1;
+    std::string part;
     if (tokens.size() < 2)
     {
         sendTextFrameAndLogError("error: cmd=load kind=syntax");
         return false;
     }
 
-    std::string timestamp;
-    parseDocOptions(tokens, part, timestamp);
-
-    std::string renderOpts;
-    if (!getDocOptions().empty())
-    {
-        Parser parser;
-        Poco::Dynamic::Var var = parser.parse(getDocOptions());
-        const Object::Ptr& object = var.extract<Object::Ptr>();
-        Poco::Dynamic::Var rendering = object->get("rendering");
-        if (!rendering.isEmpty())
-            renderOpts = rendering.toString();
-    }
+    parseLoadCommand(tokens, part);
 
     assert(!getDocURL().empty());
     assert(!getJailedFilePath().empty());
@@ -1134,7 +1292,7 @@ bool ChildSession::loadDocument(const StringVector& tokens)
     // Note: _isDocLoaded is set on our return.
     const bool isFirstView = !_docManager->isLoaded();
 
-    const bool loaded = _docManager->onLoad(getId(), getJailedFilePathAnonym(), renderOpts);
+    const bool loaded = _docManager->onLoad(getId(), getJailedFilePathAnonym());
     if (!loaded || _viewId < 0)
     {
         // Failed and communicated with the reason; do not send errors to the client.
@@ -1185,12 +1343,18 @@ bool ChildSession::loadDocument(const StringVector& tokens)
     getLOKitDocument()->setView(_viewId);
 
     _docType = LOKitHelper::getDocumentTypeAsString(getLOKitDocument().get());
-    if (_docType != "text" && part != -1)
+    if (_docType != "text" && !part.empty())
     {
-        // The load option names the part by its index in document order, while
-        // the document boundary names parts by their part identifiers. Resolve
-        // the index to the identifier before selecting it.
-        const std::string partId = getLOKitDocument()->getPartId(part, 0);
+        // The load option normally names the part by its index in document order, except when
+        // reattaching, where it is already the part identifier. The document boundary names parts
+        // by their identifiers, so resolve an index to the identifier before selecting it.
+        std::string partId;
+        int index = 0;
+        if (COOLProtocol::stringToInteger(part, index))
+            partId = getLOKitDocument()->getPartId(index, 0);
+        else if (COOLProtocol::isValidPartId(part))
+            partId = part;
+
         if (!partId.empty())
             getLOKitDocument()->setPart(partId.c_str());
     }
@@ -1342,24 +1506,43 @@ void insertUserNames(const std::map<int, UserInfo>& viewInfo, std::string& json)
 // between compression ratio and speed.
 constexpr int zstdCompressionLevel = 3;
 
-bool ChildSession::sendZstdFrame(std::string_view headerName, const char* data, size_t size)
+std::vector<char> ChildSession::zstdFrame(std::string_view headerName, const char* data,
+                                          size_t size)
 {
-    const std::string header(headerName);
     const size_t bound = ZSTD_COMPRESSBOUND(size);
-    std::vector<char> output(header.size() + bound);
-    std::memcpy(output.data(), header.data(), header.size());
+    std::vector<char> output(headerName.size() + bound);
+    std::memcpy(output.data(), headerName.data(), headerName.size());
 
-    const size_t compressedSize
-        = ZSTD_compress(output.data() + header.size(), bound, data, size, zstdCompressionLevel);
+    const size_t compressedSize =
+        ZSTD_compress(output.data() + headerName.size(), bound, data, size, zstdCompressionLevel);
     if (ZSTD_isError(compressedSize))
     {
-        LOG_WRN("Failed to zstd-compress " << headerName << ": "
-                                           << ZSTD_getErrorName(compressedSize));
-        return false;
+        LOG_WRN_S("Failed to zstd-compress " << headerName << ": "
+                                             << ZSTD_getErrorName(compressedSize));
+        return {};
     }
 
-    output.resize(header.size() + compressedSize);
+    output.resize(headerName.size() + compressedSize);
+    return output;
+}
+
+bool ChildSession::sendZstdFrame(std::string_view headerName, const char* data, size_t size)
+{
+    const std::vector<char> output = zstdFrame(headerName, data, size);
+    if (output.empty())
+        return false;
     return sendBinaryFrame(output.data(), output.size());
+}
+
+void ChildSession::sendVectorDelta(const std::vector<char>& frame, const std::string& payload)
+{
+    // Without a compressed frame the JSON goes as a command values text frame.
+    const bool sent = frame.empty() ? sendTextFrame("commandvalues: " + payload)
+                                    : sendBinaryFrame(frame.data(), frame.size());
+    // The engine moved the mark for the part when it wrote the delta, so a failed send is
+    // logged.
+    if (!sent)
+        LOG_WRN("Failed to send a vector primitives delta to session [" << getId() << ']');
 }
 
 bool ChildSession::getCommandValues(const StringVector& tokens)
@@ -1402,6 +1585,11 @@ bool ChildSession::getCommandValues(const StringVector& tokens)
         // them with zstd. Fall back to an uncompressed text frame if
         // compression fails.
         const bool isFont = command.rfind(".uno:VectorRenderingFont", 0) == 0;
+
+        // A client that asks for primitives draws the document from them from here on.
+        if (!isFont)
+            _isVectorRendering = true;
+
         std::string json(getLOKitDocument()->getCommandValues(command.c_str()));
         if (json.empty())
             json = "{}";
@@ -1507,6 +1695,24 @@ bool ChildSession::outlineState(const StringVector& tokens)
     getLOKitDocument()->setView(_viewId);
 
     getLOKitDocument()->setOutlineState(column, level, index, hidden);
+    return true;
+}
+
+bool ChildSession::reportMousePointer(const StringVector& tokens)
+{
+    std::string wanted;
+
+    if (tokens.size() != 2 || !getTokenString(tokens[1], "wanted", wanted) ||
+        (wanted != "true" && wanted != "false"))
+    {
+        sendTextFrameAndLogError("error: cmd=reportmousepointer kind=syntax");
+        return false;
+    }
+
+    getLOKitDocument()->setView(_viewId);
+
+    // A client that works out the pointer from the geometry it holds is sent none.
+    getLOKitDocument()->setViewOption("mousepointer", wanted == "true" ? "on" : "off");
     return true;
 }
 
@@ -1943,7 +2149,8 @@ bool ChildSession::getClipboard(const StringVector& tokens)
 
     getLOKitDocument()->setView(_viewId);
 
-    const std::vector<COKitClipboardItem> items = getLOKitDocument()->getClipboard(mimeTypes);
+    const std::vector<COKitClipboardItem> items =
+        getLOKitDocument()->getClipboard(mimeTypes, /*bSkipDuplicateRenderings=*/true);
 
     if (items.empty())
     {
@@ -2178,6 +2385,8 @@ std::string ChildSession::writeFileToJail(const std::string& path, const char* d
 void ChildSession::postInsertCommand(const std::string& type, const std::string& url,
                                      int multimedia_width, int multimedia_height)
 {
+    const std::string escapedUrl = JsonUtil::escapeJSONValue(url);
+
     std::string command;
     std::string arguments;
     if (type == "multimedia" || type == "multimediaurl") {
@@ -2185,7 +2394,7 @@ void ChildSession::postInsertCommand(const std::string& type, const std::string&
         arguments = "{"
             "\"URL\":{"
                 "\"type\":\"string\","
-                "\"value\":\"" + url + "\""
+                "\"value\":\"" + escapedUrl + "\""
             "},"
             "\"IsLink\":{"
                 "\"type\":\"boolean\","
@@ -2217,20 +2426,23 @@ void ChildSession::postInsertCommand(const std::string& type, const std::string&
         arguments = "{"
             "\"URL\":{"
                 "\"type\":\"string\","
-                "\"value\":\"" + url + "\""
+                "\"value\":\"" + escapedUrl + "\""
             "}}";
     } else {
         command = (type == "selectbackground" ? ".uno:SelectBackground" : ".uno:InsertGraphic");
         arguments = "{"
             "\"FileName\":{"
                 "\"type\":\"string\","
-                "\"value\":\"" + url + "\""
+                "\"value\":\"" + escapedUrl + "\""
             "}}";
     }
 
     getLOKitDocument()->setView(_viewId);
 
     LOG_TRC("Inserting " << type << ": " << command << ' ' << arguments.c_str());
+
+    if (!Util::isMobileApp() && UnitKit::get().filterInsertCommand(command, arguments))
+        return;
 
     // Inserting a remote multimedia URL downloads the file here and can
     // block for a while, so ask to be told when the command finishes.
@@ -2356,8 +2568,18 @@ bool ChildSession::insertFile(const StringVector& tokens)
                    type == "comparedocuments");
             std::string binaryData;
             macaron::Base64::Decode(data, binaryData);
-            url = writeFileToJail(FileUtil::createRandomTmpDir() + '/' + name, binaryData.data(),
-                                  binaryData.size());
+
+            std::string decodedName;
+            if (type == "graphic")
+            {
+                URI::decode(name, decodedName);
+            }
+            else
+            {
+                decodedName = name;
+            }
+            url = writeFileToJail(FileUtil::createRandomTmpDir() + '/' + decodedName,
+                                  binaryData.data(), binaryData.size());
         }
 
         postInsertCommand(type, url, multimedia_width, multimedia_height);
@@ -2486,6 +2708,13 @@ bool isRecordableSourceTime(const std::string& time)
 {
     constexpr std::size_t MaxTimeLength = 128;
     return time.size() <= MaxTimeLength && !Util::holdsControlCharacter(time);
+}
+
+bool isRecordablePersistentLink(const std::string& link)
+{
+    constexpr std::size_t MaxPersistentLinkLength = 1024;
+    return !link.empty() && link.size() <= MaxPersistentLinkLength &&
+           !Util::holdsControlCharacter(link);
 }
 
 }
@@ -2720,9 +2949,7 @@ bool ChildSession::slideImportInsert(const StringVector& tokens)
         return false;
     }
 
-    // The source is the document the inserted pages record as the one they came from, as the
-    // user knows it. A name holding a path or a control character is refused.
-    if (haveSource && (!Util::isPlainFileName(source) || Util::holdsControlCharacter(source)))
+    if (haveSource && !isRecordablePersistentLink(source))
     {
         sendTextFrameAndLogError("error: cmd=slideimport kind=syntax");
         return false;
@@ -2934,9 +3161,8 @@ bool ChildSession::slideLinkUpdate(const StringVector& tokens)
         return false;
     }
 
-    // A refresh covers the pages of one source document, named by the document
-    // name the pages record.
-    if (!Util::isPlainFileName(source) || Util::holdsControlCharacter(source))
+    // A refresh covers the pages of one source document.
+    if (!isRecordablePersistentLink(source))
     {
         sendTextFrameAndLogError("error: cmd=slidelink kind=syntax" + named);
         return false;
@@ -4409,15 +4635,11 @@ bool ChildSession::selectClientPart(const StringVector& tokens)
 
     if (getLOKitDocument()->getDocumentType() != COKitDocumentType::TEXT)
     {
+        // The request carries a change the client has already made, so the selection is
+        // applied without a reply. A range comes as one request per slide, and a status
+        // after each would show the range only partly selected.
         if (part != getLOKitDocument()->getPart())
-        {
             getLOKitDocument()->selectPart(part.c_str(), select);
-
-            // Notify the client of the selection update.
-            const std::string status = LOKitHelper::documentStatus(getLOKitDocument().get());
-            if (!status.empty())
-                return sendTextFrame("statusupdate: " + status);
-        }
     }
     else
     {
@@ -4602,6 +4824,8 @@ bool ChildSession::executeScript(char const * buffer, int length, StringVector c
     }
     auto const source = full.substr(lineEnd + 1, sourceEnd - lineEnd - 1);
     std::string const script(full.substr(sourceEnd + 1));
+
+    getLOKitDocument()->setView(_viewId);
 
     // Capturing `this` is safe even though the proxy callback can fire long after
     // executeScript has returned, since the callback runs only while the proxy stays
@@ -4905,20 +5129,8 @@ void ChildSession::loKitCallback(const COKitCallbackType type, const std::string
     switch (type)
     {
     case COKitCallbackType::VECTOR_PRIMITIVES_DELTA:
-        // A background save forwards only text messages to the process that
-        // forked it, so it sends no content of its own.
-        if (_docManager->isBackgroundSaveProcess())
-        {
-            LOG_TRC("Skipping callback [" << typeName << "] in the background save process");
-            return;
-        }
-        // Push the delta to the client as a zstd binary frame, the same
-        // shape the .uno:VectorPrimitives command response uses. When
-        // compression fails, send the JSON as a command values text
-        // frame, which the client routes by its type field, so the
-        // delta still arrives.
-        if (!sendZstdFrame("zstdvectorprimitivesdelta:\n", payload.data(), payload.size()))
-            sendTextFrame("commandvalues: " + payload);
+        // A delta describes the part rather than one view, so a session has nothing of its own
+        // to send for it.
         break;
     case COKitCallbackType::PRESENTATION_INFO:
         // The engine signalled that the presentation info changed. Rebuild
@@ -5255,15 +5467,6 @@ void ChildSession::loKitCallback(const COKitCallbackType type, const std::string
                 getTextSelectionInternal("");
             else
                 sendTextFrame("clipboardchanged: " + payload);
-        }
-
-        break;
-    }
-    case COKitCallbackType::CLIPBOARD_MIMETYPES:
-    {
-        if (_copyToClipboard)
-        {
-            sendTextFrame("clipboardmimetypes: " + payload);
         }
 
         break;

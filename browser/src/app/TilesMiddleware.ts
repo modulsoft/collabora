@@ -130,6 +130,10 @@ class RenderManager {
 		RenderManager.ensureInstance().onTileMsg(textMsg, img);
 	}
 
+	static onTileGoneMsg(textMsg: string): void {
+		RenderManager.ensureInstance().onTileGoneMsg(textMsg);
+	}
+
 	static predictTilesToSlurp(): number {
 		return RenderManager.ensureInstance().predictTilesToSlurp();
 	}
@@ -221,19 +225,24 @@ class RenderManager {
 	static requestThumbnail(
 		id: cool.PreviewId,
 		part: number,
+		mode: number,
 		maxWidth: number,
 		maxHeight: number,
 	): void {
 		RenderManager.ensureInstance().requestThumbnail(
 			id,
 			part,
+			mode,
 			maxWidth,
 			maxHeight,
 		);
 	}
 
-	static requestPart(part: number): cool.VectorPrimitivesData | undefined {
-		return RenderManager.ensureInstance().requestPart(part);
+	static requestPart(
+		part: number,
+		mode: number,
+	): cool.VectorPrimitivesData | undefined {
+		return RenderManager.ensureInstance().requestPart(part, mode);
 	}
 
 	static renderInto(
@@ -244,8 +253,19 @@ class RenderManager {
 		RenderManager.ensureInstance().renderInto(context, data, options);
 	}
 
-	static setLayerVisible(layer: number, visible: boolean): void {
-		RenderManager.ensureInstance().setLayerVisible(layer, visible);
+	static renderPlaceholderAids(
+		context: CanvasRenderingContext2D,
+		data: cool.VectorPrimitivesData,
+	): void {
+		RenderManager.ensureInstance().renderPlaceholderAids(context, data);
+	}
+
+	static setHiddenLayers(layers: unknown): void {
+		RenderManager.ensureInstance().setHiddenLayers(layers);
+	}
+
+	static isPartDrawable(part: number, mode: number): boolean {
+		return RenderManager.ensureInstance().isPartDrawable(part, mode);
 	}
 
 	static isLayerVisible(layer: number): boolean {
@@ -282,8 +302,12 @@ class RenderManager {
 		RenderManager.ensureInstance().handleVectorPrimitivesDelta(values);
 	}
 
-	static clearCachedPart(part: number): void {
-		RenderManager.ensureInstance().clearCachedPart(part);
+	static partListChanged(): void {
+		RenderManager.ensureInstance().partListChanged();
+	}
+
+	static clearCachedPart(part: number, mode: number): void {
+		RenderManager.ensureInstance().clearCachedPart(part, mode);
 	}
 
 	static clearAllParts(): void {
@@ -291,4 +315,4 @@ class RenderManager {
 	}
 }
 
-(window as any).RenderManager = RenderManager;
+window.RenderManager = RenderManager;

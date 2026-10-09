@@ -79,19 +79,7 @@ span.notebookbar.static-label,
 	display: inline-flex;
 	flex: 0.1 0.1 auto;
 	margin-inline-start: 5px;
-	overflow-x: auto;
-	scrollbar-width: thin;
 	min-width: 0;
-}
-
-.notebookbar-tabs-container::-webkit-scrollbar {
-	height: 3px;
-	background-color: var(--color-background-darker);
-}
-
-.notebookbar-tabs-container::-webkit-scrollbar-thumb {
-	background-color: var(--color-border-darker);
-	border-radius: 2px;
 }
 
 .ui-tabs.notebookbar {
@@ -100,18 +88,15 @@ span.notebookbar.static-label,
 	padding: 0px;
 	height: 100%;
 	overflow-x: auto;
-	scrollbar-width: thin;
+	scrollbar-color: var(--scrollbar-color);
+	scrollbar-width: none;
 	max-width: 100%;
 }
 
-.ui-tabs.notebookbar::-webkit-scrollbar {
-	height: 3px;
-	background-color: var(--color-background-darker);
-}
-
-.ui-tabs.notebookbar::-webkit-scrollbar-thumb {
-	background-color: var(--color-border-darker);
-	border-radius: 2px;
+@media (max-width: 480px) {
+	.ui-tabs.notebookbar {
+		scrollbar-width: var(--scrollbar-width);
+	}
 }
 
 .ui-tab.notebookbar {
@@ -454,7 +439,7 @@ label.notebookbar.ui-checkbox-label {
 	padding: var(--spacing-s);
 }
 
-.ui-combobox[disabled],
+.ui-combobox.notebookbar[disabled],
 .unotoolbutton.notebookbar.disabled:not(.unospan-shortcutstoolbox),
 .unotoolbutton[disabled]:not(.unospan-shortcutstoolbox) {
 	cursor: not-allowed;
@@ -480,10 +465,23 @@ label.notebookbar.ui-checkbox-label {
 	filter: grayscale(100%) brightness(100%);
 }
 
+/* Fill Color (Writer > Picture) button swatch */
+.unotoolbutton.notebookbar.disabled .selected-color,
+.unotoolbutton[disabled] .selected-color {
+	filter: grayscale(100%);
+}
+
+.ui-combobox.notebookbar[disabled] img {
+	opacity: var(--opacity-icon-disabled-light);
+}
+
+.ui-combobox-button.notebookbar[disabled] .ui-listbox-arrow,
 .unotoolbutton.notebookbar.disabled img,
 .unotoolbutton.notebookbar.disabled .unoarrow,
+.unotoolbutton.notebookbar.disabled .selected-color,
 .unotoolbutton[disabled] img,
-.unotoolbutton[disabled] .unoarrow {
+.unotoolbutton[disabled] .unoarrow,
+.unotoolbutton[disabled] .selected-color {
 	opacity: var(--opacity-icon-disabled);
 }
 
@@ -500,6 +498,11 @@ label.notebookbar.ui-checkbox-label {
 .ui-combobox[disabled] *,
 .unotoolbutton[disabled] * {
 	cursor: not-allowed !important;
+}
+
+/* do not focus on disabled items */
+.unotoolbutton[disabled] .unobutton {
+	pointer-events: none;
 }
 
 .unotoolbutton.notebookbar {
@@ -532,6 +535,19 @@ label.notebookbar.ui-checkbox-label {
 	display: inline-block;
 	clear: both;
 	color: var(--color-main-text);
+}
+
+/* big color split button */
+.unotoolbutton.notebookbar.has-label.has-colorpicker .unobutton img {
+	width: var(--btn-img-size) !important;
+	height: var(--btn-img-size) !important;
+	object-fit: contain;
+	margin: 0 auto !important;
+}
+
+.unotoolbutton.notebookbar.has-label.has-colorpicker .selected-color {
+	display: block;
+	margin: 0 auto 4px;
 }
 
 /* adding focus to tab in notebookbar */
@@ -577,6 +593,7 @@ label.notebookbar.ui-checkbox-label {
 .jsdialog #stylesview-iconview-list:not(.sidebar),
 .jsdialog #masterpagenb-iconview-list:not(.sidebar),
 .jsdialog #tablestyles_design-iconview-list:not(.sidebar),
+.jsdialog #table-design-styles-iconview-list:not(.sidebar),
 .jsdialog #transitions_icons-iconview-list:not(.sidebar),
 .jsdialog #iconview_theme_colors-iconview-list:not(.sidebar) {
 	height: auto !important;
@@ -631,6 +648,7 @@ label.notebookbar.ui-checkbox-label {
 .notebookbar#masterpageall_icons,
 .notebookbar#masterpagecurrent_icons,
 .notebookbar#tablestyles_design,
+.notebookbar#table-design-styles,
 .notebookbar#transitions_icons,
 .notebookbar#iconview_theme_colors,
 .notebookbar#custom_animation_list,
@@ -979,23 +997,30 @@ label.notebookbar.ui-checkbox-label {
 	padding: 5px 10px;
 }
 
-#tablestyles_design.notebookbar .ui-iconview-separator {
+/* The section titles of a style gallery only fit the expanded view: the strip in the
+   notebookbar has no room for them and fills every row, the dropdown shows each title on a
+   row of its own. */
+#tablestyles_design.notebookbar .ui-iconview-separator,
+#table-design-styles.notebookbar .ui-iconview-separator {
 	display: none;
 }
 
 #masterpagenb-entries .static-label.ui-text,
-#tablestyles_design .ui-iconview-separator.label {
+#tablestyles_design .ui-iconview-separator.label,
+#table-design-styles .ui-iconview-separator.label {
 	grid-column: 1 / -1;
 	padding-inline-start: 8px;
 	font-size: var(--default-font-size);
 	font-weight: 500;
 }
 
-/* Table Design Tab (Impress) */
+/* Table Design Tab (Writer and Impress) */
 
+/* Seven columns: the built-in catalog comes in rows of one style variant in its plain form
+   and its six theme accents, so each grid row is one variant and each column one accent. */
 #table-design-styles.notebookbar,
 #table-design-styles.jsdialog {
-	grid-template-columns: repeat(6, 1fr);
+	grid-template-columns: repeat(7, 1fr);
 	grid-gap: 10px;
 	padding: 5px 10px;
 }

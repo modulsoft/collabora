@@ -99,6 +99,11 @@
 	margin-inline-start: -6px;
 }
 
+.preview-avatars .avatar-img {
+	pointer-events: auto;
+	cursor: pointer;
+}
+
 .slide-user-item {
 	display: flex;
 	align-items: center;
@@ -108,12 +113,23 @@
 	font-size: var(--default-font-size);
 }
 
+/* The counter is the last circle in the avatar row, so it keeps their size. */
 .preview-avatars-more {
 	flex: 0 0 auto;
-	min-width: 24px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	box-sizing: border-box;
+	width: 24px;
 	height: 24px;
 	border: 2px solid var(--color-background-lighter);
-	border-radius: 12px;
+	border-radius: var(--border-radius-pill);
+	background: var(--color-primary-dark);
+	color: var(--color-primary-text);
+	font-family: var(--cool-font);
+	font-size: 12px;
+	font-weight: 600;
+	line-height: 1;
 	pointer-events: auto;
 	cursor: pointer;
 }
@@ -154,25 +170,21 @@
 }
 
 /* How many slides the drag carries, over the top picture's corner. */
-.slide-drag-ghost-count,
-.preview-avatars-more {
+.slide-drag-ghost-count {
+	position: absolute;
 	display: flex;
 	align-items: center;
 	justify-content: center;
 	box-sizing: border-box;
+	min-width: 22px;
+	height: 22px;
 	padding: 0 6px;
+	border-radius: 11px;
 	background: var(--color-primary);
 	color: var(--color-primary-text);
 	font-family: var(--cool-font);
 	font-size: 12px;
 	font-weight: 600;
-}
-
-.slide-drag-ghost-count {
-	position: absolute;
-	min-width: 22px;
-	height: 22px;
-	border-radius: 11px;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -215,7 +227,7 @@
 	border-radius: var(--border-radius-s);
 	background: var(--color-background-lighter) url('images/sc_linkedslide.svg') no-repeat center;
 	background-size: 16px 16px;
-	box-shadow: 0 0 2px var(--color-border);
+	box-shadow: var(--shadow-subtle);
 }
 
 .preview-link-badge.outdated::before {
@@ -334,18 +346,18 @@
 
 /* Grid layout for the slide navigator's list while the panels are
  * maximized. The slides flow into as many columns as the wide panel fits;
- * the reorder drop site and the section headers take a whole row of their
- * own. The grid takes the space left above the toolbar and scrolls on its
- * own. The rows pack at their content height from the top: left to the
- * default stretch, a short deck's row tracks would inflate to fill the panel
- * and any fixed-height cell added to a row would redistribute that slack,
- * moving every row. */
+ * the section headers take a whole row of their own. The grid takes the
+ * space left above the toolbar and scrolls on its own. The rows pack at
+ * their content height from the top: left to the default stretch, a short
+ * deck's row tracks would inflate to fill the panel and any fixed-height
+ * cell added to a row would redistribute that slack, moving every row. */
 .parts-preview-grid #slide-sorter {
 	display: grid;
 	grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
 	align-content: start;
 	gap: 12px;
-	padding: 12px;
+	--preview-outline: 3px;
+	padding: calc(20px + 1em) calc(16px + var(--preview-outline)) 12px;
 	white-space: normal;
 	overflow-x: visible;
 	overflow-y: auto;
@@ -387,9 +399,20 @@
 	width: 300px;
 }
 
-.parts-preview-grid #first-drop-site,
 .parts-preview-grid .slide-section-header {
 	grid-column: 1 / -1;
+}
+
+.parts-preview-grid #first-drop-site {
+	display: none;
+}
+
+.parts-preview-grid #slide-sorter .slide-section-header {
+	margin-inline: calc(-1 * var(--preview-outline));
+}
+
+.parts-preview-grid #slide-sorter:has(.slide-section-header:not(.preview-frame:not(#first-drop-site) ~ *)) {
+	padding-top: 20px;
 }
 
 .parts-preview-grid .preview-frame {
@@ -414,5 +437,10 @@
 }
 
 .parts-preview-grid .preview-avatars {
-	inset-inline-end: -8px;
+	inset-inline-end: 6px;
+	bottom: 6px;
+}
+
+.parts-preview-grid .preview-link-badge::before {
+	left: -22px;
 }

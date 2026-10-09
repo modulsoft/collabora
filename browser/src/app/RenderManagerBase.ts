@@ -166,6 +166,8 @@ class RenderManagerBase {
 	// -- message handling --
 	// eslint-disable-next-line @typescript-eslint/no-empty-function
 	onTileMsg(_textMsg: string, _img: any): void {}
+	// eslint-disable-next-line @typescript-eslint/no-empty-function
+	onTileGoneMsg(_textMsg: string): void {}
 
 	// -- expiry / touch --
 	getExpiryFactor(_tile: Tile): number {
@@ -182,12 +184,16 @@ class RenderManagerBase {
 	requestThumbnail(
 		_id: cool.PreviewId,
 		_part: number,
+		_mode: number,
 		_maxWidth: number,
 		_maxHeight: number,
 		// eslint-disable-next-line @typescript-eslint/no-empty-function
 	): void {}
 
-	requestPart(_part: number): cool.VectorPrimitivesData | undefined {
+	requestPart(
+		_part: number,
+		_mode: number,
+	): cool.VectorPrimitivesData | undefined {
 		return undefined;
 	}
 
@@ -198,8 +204,18 @@ class RenderManagerBase {
 		// eslint-disable-next-line @typescript-eslint/no-empty-function
 	): void {}
 
+	renderPlaceholderAids(
+		_context: CanvasRenderingContext2D,
+		_data: cool.VectorPrimitivesData,
+		// eslint-disable-next-line @typescript-eslint/no-empty-function
+	): void {}
+
 	// eslint-disable-next-line @typescript-eslint/no-empty-function
-	setLayerVisible(_layer: number, _visible: boolean): void {}
+	setHiddenLayers(_layers: unknown): void {}
+
+	isPartDrawable(_part: number, _mode: number): boolean {
+		return false;
+	}
 
 	isLayerVisible(_layer: number): boolean {
 		return true;
@@ -227,7 +243,10 @@ class RenderManagerBase {
 	handleVectorPrimitivesDelta(_values: cool.VectorPrimitivesResponse): void {}
 
 	// eslint-disable-next-line @typescript-eslint/no-empty-function
-	clearCachedPart(_part: number): void {}
+	partListChanged(): void {}
+
+	// eslint-disable-next-line @typescript-eslint/no-empty-function
+	clearCachedPart(_part: number, _mode: number): void {}
 
 	// eslint-disable-next-line @typescript-eslint/no-empty-function
 	clearAllParts(): void {}

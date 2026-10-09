@@ -17,17 +17,17 @@ describe('SlideLinks', function () {
 	let sent: string[];
 	let told: string[];
 	let posted: any[];
-	// What the class told the menubar and the uiManager about the update
-	// command. hidden starts true and commandShown starts empty, so a test
+	// What the class told the menubar and the notebookbar about the update
+	// command. hidden starts true and itemShown starts empty, so a test
 	// that reads them shown proves the show was really called.
 	let hidden: boolean;
-	let commandShown: Map<string, boolean>;
+	let itemShown: Map<string, boolean>;
 	let editable: boolean;
 	let links: SlideLinks;
 	let map: any;
 	let savedSocket: any;
 	let savedEvents: any;
-	let savedRelated: any;
+	let savedRemoteLinks: any;
 
 	// The linked pages, by the identifier each one holds.
 	const numbersPart = '{6A1C31B0-0001-4C5B-9E77-2F3D4A5B6C7D}';
@@ -67,33 +67,28 @@ describe('SlideLinks', function () {
 		posted = [];
 	}
 
-	// The related documents the storage named, one per source of the list above, each already
+	// The remote links the storage named, one per source of the list above, each already
 	// connected so that a refresh asks it straight away.
-	function relatedDocuments(state: string = 'connected'): any[] {
-		return [
-			{ wopiSrc: wopiSrcOf('Sales deck.odp'), state: state },
-			{ wopiSrc: wopiSrcOf('Support deck.odp'), state: state },
-		];
+	function remoteLinks(state: string = 'connected'): any[] {
+		return [linkOf('Sales deck.odp', state), linkOf('Support deck.odp', state)];
 	}
 
-	function wopiSrcOf(source: string): string {
-		return 'https://host/wopi/files/' + encodeURIComponent(source);
+	function linkOf(source: string, state: string): any {
+		return { name: source, persistentLink: source, state: state };
 	}
 
 	// The command that asks one source to write its pages out.
 	function exportOf(source: string): string {
 		return (
-			'remotedoccommand wopisrc=' +
-			encodeURIComponent(wopiSrcOf(source)) +
-			' exportslides'
+			'remotedoccommand source=' + encodeURIComponent(source) + ' exportslides'
 		);
 	}
 
 	// The command that asks one source for the slides it holds.
 	function infoOf(source: string): string {
 		return (
-			'remotedoccommand wopisrc=' +
-			encodeURIComponent(wopiSrcOf(source)) +
+			'remotedoccommand source=' +
+			encodeURIComponent(source) +
 			' getpresentationinfo'
 		);
 	}
@@ -128,7 +123,7 @@ describe('SlideLinks', function () {
 		told = [];
 		posted = [];
 		hidden = true;
-		commandShown = new Map();
+		itemShown = new Map();
 		editable = true;
 
 		map = {
@@ -142,8 +137,13 @@ describe('SlideLinks', function () {
 			isPresentationOrDrawing: () => true,
 			uiManager: {
 				showSnackbar: (message: string) => told.push(message),
-				showCommand: (command: string, show: boolean) => {
-					commandShown.set(command, show);
+				notebookbar: {
+					showItem: (id: string) => {
+						itemShown.set(id, true);
+					},
+					hideItem: (id: string) => {
+						itemShown.set(id, false);
+					},
 				},
 			},
 			menubar: {
@@ -158,8 +158,8 @@ describe('SlideLinks', function () {
 
 		savedSocket = app.socket;
 		savedEvents = app.events;
-		savedRelated = (app as any).relatedDocuments;
-		(app as any).relatedDocuments = relatedDocuments();
+		savedRemoteLinks = (app as any).remoteLinks;
+		(app as any).remoteLinks = remoteLinks();
 		(app as any).socket = {
 			sendMessage: (message: string) => sent.push(message),
 		};
@@ -174,7 +174,7 @@ describe('SlideLinks', function () {
 	afterEach(function () {
 		(app as any).socket = savedSocket;
 		(app as any).events = savedEvents;
-		(app as any).relatedDocuments = savedRelated;
+		(app as any).remoteLinks = savedRemoteLinks;
 	});
 
 	it('reads the links of the document once it is open', function () {
@@ -215,9 +215,9 @@ describe('SlideLinks', function () {
 	});
 
 	it('marks a page as broken when its source is missing from storage', function () {
-		(app as any).relatedDocuments = [
-			{ wopiSrc: wopiSrcOf('Sales deck.odp'), state: 'missing' },
-			{ wopiSrc: wopiSrcOf('Support deck.odp'), state: 'connected' },
+		(app as any).remoteLinks = [
+			linkOf('Sales deck.odp', 'missing'),
+			linkOf('Support deck.odp', 'connected'),
 		];
 		deliver('slidelinks', { message: list });
 
@@ -231,23 +231,23 @@ describe('SlideLinks', function () {
 	});
 
 	it('stops marking pages broken once the source is read again', function () {
-		(app as any).relatedDocuments = [
-			{ wopiSrc: wopiSrcOf('Sales deck.odp'), state: 'missing' },
-			{ wopiSrc: wopiSrcOf('Support deck.odp'), state: 'connected' },
+		(app as any).remoteLinks = [
+			linkOf('Sales deck.odp', 'missing'),
+			linkOf('Support deck.odp', 'connected'),
 		];
 		deliver('slidelinks', { message: list });
 		nodeassert.equal(links.isPageBroken(numbersPart), true);
 
 		// The source is subscribed again and connects, so its links are whole.
-		(app as any).relatedDocuments = relatedDocuments();
-		deliver('relateddocuments', { documents: (app as any).relatedDocuments });
+		(app as any).remoteLinks = remoteLinks();
+		deliver('remotelinks', { documents: (app as any).remoteLinks });
 		nodeassert.equal(links.isPageBroken(numbersPart), false);
 	});
 
 	it('marks a page as connected when its source is held open', function () {
-		(app as any).relatedDocuments = [
-			{ wopiSrc: wopiSrcOf('Sales deck.odp'), state: 'connected' },
-			{ wopiSrc: wopiSrcOf('Support deck.odp'), state: 'available' },
+		(app as any).remoteLinks = [
+			linkOf('Sales deck.odp', 'connected'),
+			linkOf('Support deck.odp', 'available'),
 		];
 		deliver('slidelinks', { message: list });
 
@@ -262,17 +262,17 @@ describe('SlideLinks', function () {
 
 	it('offers the update command for a document that holds links alone', function () {
 		deliver('slidelinks', { message: list });
-		nodeassert.equal(commandShown.get('updateslidelinks'), true);
+		nodeassert.equal(itemShown.get('insert-update-slide-links'), true);
 		nodeassert.equal(hidden, false);
 
 		deliver('slidelinks', { message: { links: [] } });
 		nodeassert.equal(links.hasLinks(), false);
-		nodeassert.equal(commandShown.get('updateslidelinks'), false);
+		nodeassert.equal(itemShown.get('insert-update-slide-links'), false);
 		nodeassert.equal(hidden, true);
 
 		// The command comes back when the document gains links again.
 		deliver('slidelinks', { message: list });
-		nodeassert.equal(commandShown.get('updateslidelinks'), true);
+		nodeassert.equal(itemShown.get('insert-update-slide-links'), true);
 		nodeassert.equal(hidden, false);
 	});
 
@@ -307,18 +307,17 @@ describe('SlideLinks', function () {
 	});
 
 	it('subscribes to a source nothing holds a link to yet', function () {
-		(app as any).relatedDocuments = relatedDocuments('available');
+		(app as any).remoteLinks = remoteLinks('available');
 		documentHoldsLinks();
 		links.updateAll();
 
 		// The source is asked for nothing until the link to it is live.
 		nodeassert.deepEqual(sent, [
-			'remotedocsubscribe wopisrc=' +
-				encodeURIComponent(wopiSrcOf('Sales deck.odp')),
+			'remotedocsubscribe source=' + encodeURIComponent('Sales deck.odp'),
 		]);
 
-		(app as any).relatedDocuments = relatedDocuments();
-		deliver('relateddocuments', { documents: (app as any).relatedDocuments });
+		(app as any).remoteLinks = remoteLinks();
+		deliver('remotelinks', { documents: (app as any).remoteLinks });
 
 		// Every source that came up is asked for the slides it holds, and the one
 		// the refresh in hand names for its pages.
@@ -330,22 +329,21 @@ describe('SlideLinks', function () {
 	});
 
 	it('carries on to the next source when one it waited on cannot be opened', function () {
-		(app as any).relatedDocuments = relatedDocuments('available');
+		(app as any).remoteLinks = remoteLinks('available');
 		documentHoldsLinks();
 		links.updateAll();
 
 		nodeassert.deepEqual(sent, [
-			'remotedocsubscribe wopisrc=' +
-				encodeURIComponent(wopiSrcOf('Sales deck.odp')),
+			'remotedocsubscribe source=' + encodeURIComponent('Sales deck.odp'),
 		]);
 
 		// The source the refresh waits on could not be opened, so it comes up
 		// in no state a refresh can read.
-		(app as any).relatedDocuments = [
-			{ wopiSrc: wopiSrcOf('Sales deck.odp'), state: 'failed' },
-			{ wopiSrc: wopiSrcOf('Support deck.odp'), state: 'connected' },
+		(app as any).remoteLinks = [
+			linkOf('Sales deck.odp', 'failed'),
+			linkOf('Support deck.odp', 'connected'),
 		];
-		deliver('relateddocuments', { documents: (app as any).relatedDocuments });
+		deliver('remotelinks', { documents: (app as any).remoteLinks });
 
 		// The user is told why that source was left, and the source behind it
 		// in the queue is refreshed.
@@ -391,9 +389,9 @@ describe('SlideLinks', function () {
 	});
 
 	it('says so rather than waiting on a source that cannot be read', function () {
-		(app as any).relatedDocuments = [
-			{ wopiSrc: wopiSrcOf('Sales deck.odp'), state: 'missing' },
-			{ wopiSrc: wopiSrcOf('Support deck.odp'), state: 'connected' },
+		(app as any).remoteLinks = [
+			linkOf('Sales deck.odp', 'missing'),
+			linkOf('Support deck.odp', 'connected'),
 		];
 		documentHoldsLinks();
 		links.updateAll();
@@ -406,7 +404,7 @@ describe('SlideLinks', function () {
 	});
 
 	it('says when the document is related to no source of that name', function () {
-		(app as any).relatedDocuments = [];
+		(app as any).remoteLinks = [];
 		documentHoldsLinks();
 		links.updateAll();
 
@@ -414,12 +412,16 @@ describe('SlideLinks', function () {
 		nodeassert.deepEqual(sent, []);
 	});
 
-	it('marks a page as broken when its source has no address to reach it at', function () {
-		// The server reports the source by name alone, which is what the slides of this
-		// document name it, and gives it no address because the storage listed none.
-		(app as any).relatedDocuments = [
-			{ wopiSrc: '', name: 'Sales deck.odp', state: 'missing' },
-			{ wopiSrc: wopiSrcOf('Support deck.odp'), state: 'connected' },
+	it('marks a page as broken when no remote link stands for its source', function () {
+		// The server reports the source by the persistent link the slides of this document
+		// record, as missing, because the storage listed no remote link for it.
+		(app as any).remoteLinks = [
+			{
+				name: 'Sales deck.odp',
+				persistentLink: 'Sales deck.odp',
+				state: 'missing',
+			},
+			linkOf('Support deck.odp', 'connected'),
 		];
 		documentHoldsLinks();
 
@@ -428,28 +430,24 @@ describe('SlideLinks', function () {
 
 		// Such a source is asked for nothing, and the user is told why.
 		links.updateAll();
-		nodeassert.ok(told[0].indexOf('currently not accessible') >= 0);
+		nodeassert.ok(told[0].indexOf('could not be read') >= 0);
 		nodeassert.deepEqual(sent, [exportOf('Support deck.odp')]);
 	});
 
-	it('knows a source by the name the storage gave it rather than by its address', function () {
-		// The address ends in an opaque id, so the name the storage gave the document is the
-		// only thing that says which source the slides of this document came from.
-		(app as any).relatedDocuments = [
+	it('names a source by its persistent link whatever the storage calls it', function () {
+		// The storage may call the file anything, so the persistent link is the only thing
+		// that says which source the slides of this document came from.
+		(app as any).remoteLinks = [
 			{
-				wopiSrc: 'https://host/wopi/files/1234',
-				name: 'Sales deck.odp',
+				name: 'Q3 sales.odp',
+				persistentLink: 'Sales deck.odp',
 				state: 'connected',
 			},
 		];
 		documentHoldsLinks();
 		links.updateAll();
 
-		nodeassert.deepEqual(sent, [
-			'remotedoccommand wopisrc=' +
-				encodeURIComponent('https://host/wopi/files/1234') +
-				' exportslides',
-		]);
+		nodeassert.deepEqual(sent, [exportOf('Sales deck.odp')]);
 	});
 
 	it('drops a refresh the connection took with it', function () {
@@ -542,7 +540,7 @@ describe('SlideLinks', function () {
 
 		// The import pane may be reading a document of its own at the same time.
 		deliver('remotedoccommandresult', {
-			wopiSrc: wopiSrcOf('Support deck.odp'),
+			source: 'Support deck.odp',
 			textMsg: 'exportslides: {"status":"staged","name":"other.odp"}',
 		});
 		nodeassert.deepEqual(sent, [exportOf('Sales deck.odp')]);
@@ -644,9 +642,7 @@ describe('SlideLinks', function () {
 	});
 
 	it('tells whether the source of a page can be read', function () {
-		(app as any).relatedDocuments = [
-			{ wopiSrc: wopiSrcOf('Sales deck.odp'), state: 'noaccess' },
-		];
+		(app as any).remoteLinks = [linkOf('Sales deck.odp', 'noaccess')];
 		deliver('slidelinks', { message: list });
 
 		nodeassert.equal(links.getPageSourceState(numbersPart), 'noaccess');
@@ -655,10 +651,21 @@ describe('SlideLinks', function () {
 		nodeassert.equal(links.getPageSourceState(ticketsPart), '');
 		nodeassert.equal(links.isPageUpdatable(ticketsPart), false);
 
-		(app as any).relatedDocuments = relatedDocuments('available');
+		(app as any).remoteLinks = remoteLinks('available');
 		nodeassert.equal(links.getPageSourceState(numbersPart), 'available');
 		nodeassert.equal(links.isPageUpdatable(numbersPart), true);
 		// A page that is linked to nothing has no source to speak of.
 		nodeassert.equal(links.getPageSourceState(unknownPart), '');
+	});
+
+	it('asks the server to look for the file of one source again', function () {
+		sent = [];
+		SlideImportSession.resolveRemoteLink('Q3 #1 100%.odp');
+
+		// The link is a whole word of the command, so it carries no space of
+		// its own and no character a command line reads.
+		nodeassert.deepEqual(sent, [
+			'remotelinkresolve source=Q3%20%231%20100%25.odp',
+		]);
 	});
 });

@@ -102,6 +102,15 @@ describe('ViewLayout', function () {
 				processingOrder: 2,
 				drawingOrder: 2,
 			};
+			// The multi-page layout looks the comment list up by name to learn how
+			// much width the comment column takes. No comment section is registered
+			// here, so the lookup comes back empty and the column takes no width.
+			(app.CSections as any).CommentList = {
+				name: 'comment list',
+				zIndex: 5,
+				processingOrder: 24,
+				drawingOrder: 55,
+			};
 
 			// app.file is populated by docstate.ts in the browser. ViewLayoutMultiPage
 			// reset() reads app.file.writer.pageRectangleList, and the follow-state
@@ -164,8 +173,8 @@ describe('ViewLayout', function () {
 
 			// sendTileCombineMessage reads app.tile.size.{x,y} and calls
 			// app.socket.sendMessage. Provide both.
-			(app.tile as any).size = { x: 3840, y: 3840 };
-			(app.socket as any).sendMessage = function () {};
+			(app.tile.size as any) = { x: 3840, y: 3840 };
+			app.socket.sendMessage = function () {};
 
 			// The tile grid is enumerated in steps of window.tileSize pixels. The
 			// browser sets this from the server; tests fix it at 256 pixels, which
@@ -1323,9 +1332,12 @@ describe('ViewLayout', function () {
 			};
 			(app.sectionContainer as any).requestReDraw = function () {};
 
-			const originalWindowMode = (window as any).mode;
+			const originalWindowMode = window.mode;
 			(window as any).mode = {
 				isSmallScreenDevice: function () {
+					return false;
+				},
+				isInteractivePreview: function () {
 					return false;
 				},
 			};
@@ -1392,7 +1404,7 @@ describe('ViewLayout', function () {
 				);
 			} finally {
 				layoutingService.appendLayoutingTask = originalAppendLayoutingTask;
-				(window as any).mode = originalWindowMode;
+				window.mode = originalWindowMode;
 			}
 		});
 

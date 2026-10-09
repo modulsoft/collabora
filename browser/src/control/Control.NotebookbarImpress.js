@@ -19,7 +19,7 @@ window.L.Control.NotebookbarImpress = window.L.Control.NotebookbarWriter.extend(
 
 	getShortcutsBarData: function() {
 		return [
-			!this.map['wopi'].HideSaveOption ?
+			!this.map['wopi'].HideSaveOption && !this.map.isReadOnlyMode() ?
 				{
 					'id': 'shortcutstoolbox',
 					'type': 'toolbox',
@@ -129,7 +129,7 @@ window.L.Control.NotebookbarImpress = window.L.Control.NotebookbarWriter.extend(
 				'text': _('Table'),
 				'name': 'Table',
 				'context': 'Table',
-				'accessibility': { focusBack: false, combination: 'T', de: null }
+				'accessibility': { focusBack: false, combination: 'TB', de: null }
 			},
 			{
 				'id': 'Shape-tab-label',
@@ -159,6 +159,8 @@ window.L.Control.NotebookbarImpress = window.L.Control.NotebookbarWriter.extend(
 				'context': 'MasterPage',
 				'accessibility': { focusBack: false, combination: 'M', de: null }
 			},
+			app.LOUtil.isAIAssistantAvailable(this.map)
+				? JSDialog.AIAssistantTab.getEntry() : null,
 			{
 				'id': 'View-tab-label',
 				'text': _('View'),
@@ -205,6 +207,7 @@ window.L.Control.NotebookbarImpress = window.L.Control.NotebookbarWriter.extend(
 			this.getPictureTab(),
 			this.getChartTab(),
 			this.getMasterTab(),
+			this.getAIAssistantTab(),
 			this.getViewTab(),
 			this.getExtensionsTab(),
 			this.getHelpTab()
@@ -219,7 +222,7 @@ window.L.Control.NotebookbarImpress = window.L.Control.NotebookbarWriter.extend(
 
 	getFileTab: function() {
 		var content = [];
-		var hasSave = !this.map['wopi'].HideSaveOption;
+		var hasSave = !this.map['wopi'].HideSaveOption && !this.map.isReadOnlyMode();
 		var hasSaveAs = !this.map['wopi'].UserCanNotWriteRelative;
 		var hasShare = this.map['wopi'].EnableShare;
 		var hasRevisionHistory = window.L.Params.revHistoryEnabled;
@@ -799,6 +802,7 @@ window.L.Control.NotebookbarImpress = window.L.Control.NotebookbarWriter.extend(
 				'id':'invertbackground',
 				'class': 'unoinvertbackground',
 				'type': 'bigcustomtoolitem',
+				'visible': window.prefs.getBoolean('darkTheme'),
 				'text': _('Invert Background'),
 				'accessibility': { focusBack: true, combination: 'BG', de: null }
 			},
@@ -813,19 +817,13 @@ window.L.Control.NotebookbarImpress = window.L.Control.NotebookbarWriter.extend(
 			{
 				'id': 'view-shapes-deck',
 				'type': 'bigtoolitem',
-				'text': _UNO('.uno:SidebarDeck.ShapesDeck', 'presentation'),
+				// To do: add a fixed row "Open Shapes Sidebar" to the existing
+				//   Home -> "Shapes" dropdown, similarly as we do for the Writer:
+				//   Home -> Styles -> Open Styles Sidebar
+				'text': _('Shapes Sidebar'),
 				'command': '.uno:SidebarDeck.ShapesDeck',
 				'accessibility': { focusBack: true, combination: 'SH', de: null }
 			},
-			app.LOUtil.isAIAssistantAvailable(this.map) ? {
-				'id': 'view-ai-sidebar',
-				'type': 'bigcustomtoolitem',
-				'text': _('AI Assistant'),
-				'tooltip': _('AI Assistant'),
-				'icon': 'lc_ai_sidebar.svg',
-				'command': 'aichat',
-				'accessibility': { focusBack: true, combination: 'AI', de: null }
-			} : {}
 		];
 
 		return this.getTabPage('View', content);
@@ -1592,6 +1590,7 @@ window.L.Control.NotebookbarImpress = window.L.Control.NotebookbarWriter.extend(
 						'text': _('Update Links'),
 						'command': 'updateslidelinks',
 						'icon': 'lc_updateall.svg',
+						'visible': !!this.map.slideLinks && this.map.slideLinks.hasLinks(),
 						'accessibility': { focusBack: true, combination: 'UL', de: null }
 					}
 				]
@@ -2175,6 +2174,16 @@ window.L.Control.NotebookbarImpress = window.L.Control.NotebookbarWriter.extend(
 						'accessibility': { focusBack: true, combination: 'RC', de: null }
 					}
 				]
+			},
+			{ type: 'separator', id: 'review-comments-break', orientation: 'vertical' },
+			{
+				'id': 'review-cleanup',
+				'class': 'unoCleanup',
+				'type': 'bigcustomtoolitem',
+				'text': _('Clean Up'),
+				'tooltip': _('Clean Up'),
+				'command': 'cleanupdeck',
+				'accessibility': { focusBack: false, combination: 'CL', de: null }
 			},
 		];
 
@@ -3278,9 +3287,11 @@ window.L.Control.NotebookbarImpress = window.L.Control.NotebookbarWriter.extend(
 			},
 			{ type: 'separator', id: 'picture-leavegroup-break', orientation: 'vertical' },
 			{
+				'id': 'picture-crop',
 				'type': 'bigtoolitem',
 				'text': _UNO('.uno:Crop'),
 				'command': '.uno:Crop',
+				'accessibility': { focusBack: true, combination: 'CR', de: null },
 				'context': 'Graphic'
 			},
 			{ type: 'separator', id: 'picture-crop-break', orientation: 'vertical' },

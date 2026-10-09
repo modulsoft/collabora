@@ -17,7 +17,7 @@
  * text area itself.
  */
 
-/* global app _ _n */
+/* global app _ _n cool */
 
 window.L.A11yTextInput = window.L.TextInput.extend({
 	initialize: function() {
@@ -41,6 +41,8 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 		this._lastSelectionEnd = 0;
 		this._listPrefixLength = 0;
 		this._isLeftRightArrow = 0;
+		this._pendingFocusedParagraph = null;
+		this._lineNavigation = false;
 
 		// pending macOS live region update
 		this._a11yLiveRegionUpdate = 0;
@@ -49,15 +51,18 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 		this._a11yContext = '';
 
 		this._updateA11yEditableStateBound = this._updateA11yEditableState.bind(this);
+		this._onStrayKeyDownBound = this._onStrayKeyDown.bind(this);
 	},
 
 	onAdd: function() {
 		window.L.TextInput.prototype.onAdd.call(this);
+		this._initContextRegions();
 		// the canvas only exists once the doc layer has been built
 		this._map.on('doclayerinit', this._bindCanvasFocusGuard, this);
 		this._map.on('doclayerinit', this._updateA11yEditableState, this);
 		this._map.on('updateparts', this._onA11yPartChanged, this);
 		app.events.on('updatepermission', this._updateA11yEditableStateBound);
+		document.addEventListener('keydown', this._onStrayKeyDownBound, true);
 	},
 
 	onRemove: function() {
@@ -65,6 +70,7 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 		this._map.off('doclayerinit', this._updateA11yEditableState, this);
 		this._map.off('updateparts', this._onA11yPartChanged, this);
 		app.events.off('updatepermission', this._updateA11yEditableStateBound);
+		document.removeEventListener('keydown', this._onStrayKeyDownBound, true);
 		var canvas = document.getElementById('document-canvas');
 		if (canvas)
 			window.L.DomEvent.off(canvas, 'mousedown', this._keepFocusOnCanvasClick, this);
@@ -142,19 +148,44 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 	},
 
 	setHTML: function(content) {
+		// eslint-disable-next-line no-restricted-syntax -- spacer markup around escaped text
 		this._textArea.innerHTML = this._wrapContent(content);
 	},
 
 	_prependSpace: function() {
+		// eslint-disable-next-line no-restricted-syntax -- spacer markup around escaped text
 		this._textArea.innerHTML = this._preSpaceChar + this._textArea.innerHTML;
 	},
 
 	_appendSpace: function() {
+		// eslint-disable-next-line no-restricted-syntax -- spacer markup around escaped text
 		this._textArea.innerHTML = this._textArea.innerHTML + this._postSpaceChar;
 	},
 
 	_getLastCursorPosition: function() {
 		return this._lastCursorPosition;
+	},
+
+	_getCaretOffsetX: function() {
+		return this._getTextOffsetX(this._getLastCursorPosition());
+	},
+
+	// x of the given position in the text, from the editable's left edge
+	_getTextOffsetX: function(nPos) {
+		let offset = nPos;
+		const walker = document.createTreeWalker(this._textArea, NodeFilter.SHOW_TEXT);
+		for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+			if (offset <= node.length) {
+				const range = document.createRange();
+				range.setStart(node, offset);
+				const caret = range.getBoundingClientRect();
+				if (caret.height === 0)
+					return 0; // not laid out
+				return caret.left - this._textArea.getBoundingClientRect().left;
+			}
+			offset -= node.length;
+		}
+		return 0;
 	},
 
 	_setLastCursorPosition: function(nPos) {
@@ -187,6 +218,7 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 
 		this._setLastCursorPosition(pos);
 		this._setCursorPosition(pos);
+		this.update();
 	} ,
 
 	_updateSelection: function(pos, start, end, forced) {
@@ -206,6 +238,7 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 				// while typing can mess up editable area content.
 				this._setLastSelection(start, end);
 				this._setSelectionRange(start, end);
+				this.update();
 			}
 		}
 		this._setSelectionFlag(hasSelection);
@@ -225,11 +258,48 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 
 		this._isComposing = false;
 		this._isLeftRightArrow = 0;
-		if (!this._hasFormulaBarFocus()) {
-			this.setHTML(content);
-			this.updateLastContent();
-			this._updateSelection(pos, start, end, true);
+		if (this._hasFormulaBarFocus()) {
+			this._placeContextRegions();
+			return;
 		}
+
+		const current = this.getPlainTextContent();
+		this._pendingFocusedParagraph = null;
+		if (!this._lineNavigation || current === '' || content === '' || content === current) {
+			this._fillFocusedParagraph(content, pos, start, end);
+			return;
+		}
+
+		// Emptied first, so Chrome reports the new paragraph whole, not only what differs from the last.
+		const pending = { content: content, pos: pos, start: start, end: end };
+		this._pendingFocusedParagraph = pending;
+		this.resetContent();
+		requestAnimationFrame(() => requestAnimationFrame(() => {
+			if (this._pendingFocusedParagraph === pending)
+				this._flushFocusedParagraph();
+		}));
+	},
+
+	_fillFocusedParagraph: function(content, pos, start, end) {
+		this.setHTML(content);
+		this.updateLastContent();
+		this._updateSelection(pos, start, end, true);
+		this._placeContextRegions();
+	},
+
+	_flushFocusedParagraph: function() {
+		const pending = this._pendingFocusedParagraph;
+		if (!pending)
+			return;
+		this._pendingFocusedParagraph = null;
+		this._fillFocusedParagraph(pending.content, pending.pos, pending.start, pending.end);
+	},
+
+	_onKeyDown: function(ev) {
+		this._flushFocusedParagraph();
+		this._lineNavigation = ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown'].includes(ev.key)
+			|| ((ev.key === 'Home' || ev.key === 'End') && ev.ctrlKey);
+		window.L.TextInput.prototype._onKeyDown.call(this, ev);
 	},
 
 	_updateFocusedParagraph: function() {
@@ -248,8 +318,47 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 		this._remoteSelectionEnd = undefined;
 	},
 
-	onAccessibilityFocusChanged: function(content, pos, start, end, listPrefixLength, force) {
+	// One description carries every piece, so setting it alone would drop the others.
+	_caretDescription: function() {
+		const parts = [];
+		if (this._headingLevel)
+			parts.push(_('Heading level {0}').replace('{0}', this._headingLevel));
+		return parts.join('. ');
+	},
+
+	_describeCaretState: function() {
+		const description = this._caretDescription();
+		if (!description && !this._caretDescribed)
+			return;
+
+		this._caretDescribed = !!description;
+		this._setDescription(description);
+	},
+
+	// TextInput empties the description on blur.
+	_onFocusBlur: function(ev) {
+		if (ev.type === 'blur')
+			this._caretDescribed = false;
+		else
+			this._describeCaretState();
+		window.L.TextInput.prototype._onFocusBlur.call(this, ev);
+	},
+
+	_setHeadingLevel: function(level) {
+		const parsed = parseInt(level) || 0;
+		if (parsed === (this._headingLevel || 0))
+			return;
+		this._headingLevel = parsed;
+		this._describeCaretState();
+	},
+
+	onAccessibilityFocusChanged: function(content, pos, start, end, listPrefixLength, force, before, after,
+		beforeRects, afterRects, headingLevel) {
 		this._listPrefixLength = listPrefixLength;
+		this._setHeadingLevel(headingLevel);
+		this._endContextJump();
+		this._setContextParagraphs(before, after, beforeRects, afterRects);
+		this._requestHeadings();
 		if (!this.hasFocus() || (this._isComposing && !force)) {
 			this._log('onAccessibilityFocusChanged: skipped updating: '
 				+ '\n  hasFocus: ' + this.hasFocus()
@@ -264,8 +373,336 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 		}
 	},
 
-	setA11yFocusedParagraph: function(content, pos, start, end) {
-		this._setFocusedParagraph(content, pos, start, end);
+	setA11yFocusedParagraph: function(content, pos, start, end, before, after, beforeRects, afterRects, headingLevel) {
+		this._setHeadingLevel(headingLevel);
+		if (this._isComposing) {
+			this._remoteContent = content;
+			this._remotePosition = pos;
+			this._remoteSelectionStart = start;
+			this._remoteSelectionEnd = end;
+		} else {
+			this._setFocusedParagraph(content, pos, start, end);
+		}
+		this._setContextParagraphs(before, after, beforeRects, afterRects);
+	},
+
+	// getPlainTextContent() reads the whole editable, and every caret offset is
+	// measured against it.
+	_initContextRegions: function() {
+		if (this._contextBefore || !this._container)
+			return;
+
+		const createContextRegion = function (id) {
+			const region = document.createElement('div');
+			region.id = id;
+			region.className = 'a11y-context';
+			region.setAttribute('aria-hidden', 'false');
+			region.setAttribute('contenteditable', 'false');
+			return region;
+		};
+
+		this._headingsAbove = createContextRegion('a11y-headings-above');
+		this._contextBefore = createContextRegion('a11y-context-before');
+		this._contextAfter = createContextRegion('a11y-context-after');
+		this._headingsBelow = createContextRegion('a11y-headings-below');
+		window.L.DomEvent.on(this._contextBefore, 'focusin', this._onContextFocus, this);
+		window.L.DomEvent.on(this._contextAfter, 'focusin', this._onContextFocus, this);
+		this._container.insertBefore(this._headingsAbove, this._textArea);
+		this._container.insertBefore(this._contextBefore, this._textArea);
+		this._container.insertBefore(this._contextAfter, this._textArea.nextSibling);
+		this._container.insertBefore(this._headingsBelow, this._contextAfter.nextSibling);
+	},
+
+	_requestHeadings: function() {
+		if (this._map.getDocType() !== 'text')
+			return;
+
+		clearTimeout(this._headingsRequestTimer);
+		this._headingsRequestTimer = setTimeout(function () {
+			app.socket.sendMessage('commandvalues command=.uno:Headings');
+		}, 250);
+	},
+
+	setA11yHeadings: function(values) {
+		this._headings = values && Array.isArray(values.headings) ? values.headings : [];
+		this._initContextRegions();
+		this._fillHeadingRegions();
+	},
+
+	// A heading given around the caret, or the one being edited, is left out: the
+	// reader would list it twice.
+	_fillHeadingRegions: function() {
+		if (!this._headingsAbove || !this._headings)
+			return;
+
+		const toRect = function (twips) {
+			return typeof twips === 'string' ? twips.split(',').map(Number) : null;
+		};
+		const holds = function (rect, x, y) {
+			return rect && x >= rect[0] && x <= rect[0] + rect[2] && y >= rect[1] && y <= rect[1] + rect[3];
+		};
+		const given = Array.from(this._contextBefore.children).concat(Array.from(this._contextAfter.children))
+			.map(function (span) { return toRect(span.dataset.twips); }).filter(Boolean);
+		const before = given.slice(0, this._contextBefore.children.length);
+		const after = given.slice(before.length);
+		const caret = app.file.textCursor.rectangle;
+		const caretX = caret.x1 + 1;
+		const caretY = (caret.y1 + caret.y2) / 2;
+		let splitY = caret.y1;
+		if (before.length)
+			splitY = before[before.length - 1][1] + before[before.length - 1][3];
+		else if (after.length)
+			splitY = after[0][1];
+
+		const above = [];
+		const below = [];
+		this._headings.forEach(function (heading) {
+			const rect = toRect(heading.rect);
+			if (!rect) {
+				below.push(heading);
+				return;
+			}
+			const x = rect[0] + 1;
+			const y = rect[1] + rect[3] / 2;
+			if (given.some(function (span) { return holds(span, x, y); }))
+				return;
+			if (holds(rect, caretX, caretY))
+				return;
+			(y < splitY ? above : below).push(heading);
+		});
+
+		const key = JSON.stringify([above, below]);
+		if (key === this._headingsKey)
+			return;
+		this._headingsKey = key;
+
+		const fill = function (region, headings) {
+			region.replaceChildren();
+			headings.forEach(function (heading) {
+				const element = document.createElement('div');
+				element.setAttribute('role', 'heading');
+				element.setAttribute('aria-level', heading.level);
+				const link = document.createElement('a');
+				link.href = '#';
+				link.textContent = heading.text;
+				link.dataset.target = heading.target;
+				link.addEventListener('click', function (event) {
+					event.preventDefault();
+					this._jumpToHeading(heading.target);
+				}.bind(this));
+				element.appendChild(link);
+				region.appendChild(element);
+			}.bind(this));
+		}.bind(this);
+		fill(this._headingsAbove, above);
+		fill(this._headingsBelow, below);
+		this._placeContextRegions();
+	},
+
+	// NVDA puts its browse cursor where the focus lands, so the paragraphs around must be there first.
+	_jumpToHeading: function(target) {
+		app.map.sendUnoCommand('.uno:JumpToMark?Bookmark:string='
+			+ encodeURIComponent(target + '|outline'));
+		clearTimeout(this._headingJump);
+		this._headingJump = setTimeout(this._endHeadingJump.bind(this), 1000);
+	},
+
+	_endHeadingJump: function() {
+		if (!this._headingJump)
+			return;
+		clearTimeout(this._headingJump);
+		this._headingJump = null;
+		this.focus();
+	},
+
+	update: function() {
+		window.L.TextInput.prototype.update.call(this);
+		this._placeContextRegions();
+	},
+
+	onVisibleAreaChanged: function() {
+		if (!this._map || !this._map._docLoaded)
+			return;
+		this.update();
+		if (!this.hasAccessibilitySupport() || !this.hasFocus())
+			return;
+
+		clearTimeout(this._contextRequestTimer);
+		this._contextRequestTimer = setTimeout(this._requestFocusedParagraph.bind(this), 250);
+	},
+
+	_setContextParagraphs: function(before, after, beforeRects, afterRects) {
+		this._initContextRegions();
+		if (!this._contextBefore)
+			return;
+
+		// The spans are reused: a reader whose position is on one that goes away looks for
+		// another nearby and leaves focus mode.
+		const fillContextRegion = function (region, paragraphs, rects) {
+			const texts = Array.isArray(paragraphs) ? paragraphs : [];
+			while (region.children.length > texts.length)
+				region.lastElementChild.remove();
+			texts.forEach(function (text, index) {
+				let span = region.children[index];
+				if (!span) {
+					span = document.createElement('span');
+					span.setAttribute('role', 'paragraph');
+					region.appendChild(span);
+				}
+				// NVDA and JAWS focus it on leaving browse mode; Orca would focus every one it reads.
+				if (window.L.Browser.win)
+					span.tabIndex = -1;
+				else
+					span.removeAttribute('tabindex');
+				if (span.textContent !== text)
+					span.textContent = text;
+				if (Array.isArray(rects) && typeof rects[index] === 'string')
+					span.dataset.twips = rects[index];
+				else
+					delete span.dataset.twips;
+			});
+		};
+
+		fillContextRegion(this._contextBefore, before, beforeRects);
+		fillContextRegion(this._contextAfter, after, afterRects);
+		this._fillHeadingRegions();
+		this._placeContextRegions();
+		this._endHeadingJump();
+	},
+
+	_onContextFocus: function(ev) {
+		if (ev.target.dataset && ev.target.dataset.twips)
+			this._jumpToContextParagraph(ev.target.dataset.twips);
+	},
+
+	// Orca leaves the focus on the outline link, or on the page with the selection on the
+	// paragraph, it was reading when it enters focus mode, so the first key decides where the
+	// caret goes.
+	_onStrayKeyDown: function(ev) {
+		if (!this._contextBefore)
+			return;
+		if (['Tab', 'Shift', 'Control', 'Alt', 'Meta', 'Insert', 'CapsLock'].includes(ev.key))
+			return;
+		const active = document.activeElement;
+		if (ev.key !== 'Enter' && active && active.dataset && active.dataset.target
+			&& (this._headingsAbove.contains(active) || this._headingsBelow.contains(active))) {
+			window.L.DomEvent.stop(ev);
+			this._jumpToHeading(active.dataset.target);
+			return;
+		}
+		if (active !== document.body)
+			return;
+		const anchor = window.getSelection() ? window.getSelection().anchorNode : null;
+		const element = anchor && anchor.nodeType === Node.TEXT_NODE ? anchor.parentNode : anchor;
+		const paragraph = element && element.closest ? element.closest('.a11y-context > span') : null;
+		if (!paragraph || !paragraph.dataset.twips)
+			return;
+
+		window.L.DomEvent.stop(ev);
+		let target = paragraph;
+		if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+			const down = ev.key === 'ArrowDown';
+			const sibling = down ? paragraph.nextElementSibling : paragraph.previousElementSibling;
+			if (sibling)
+				target = sibling;
+			else if ((paragraph.parentNode === this._contextBefore) === down) {
+				this._textArea.focus({ preventScroll: true });
+				return;
+			}
+		}
+		this._jumpToContextParagraph(target.dataset.twips);
+	},
+
+	_jumpToContextParagraph: function(twips) {
+		if (!this._map._docLayer)
+			return;
+
+		this._contextJump = setTimeout(this._endContextJump.bind(this), 1000);
+		const rect = twips.split(',').map(Number);
+		const x = rect[0] + 1;
+		const y = rect[1] + Math.min(rect[3] / 2, 120);
+		this._map._docLayer._postMouseEvent('buttondown', x, y, 1, app.LOButtons.left, 0);
+		this._map._docLayer._postMouseEvent('buttonup', x, y, 1, app.LOButtons.left, 0);
+	},
+
+	// Given back once the caret is there, and before the regions are refilled: the focused
+	// paragraph going away with them makes the reader announce the page again.
+	_endContextJump: function() {
+		if (!this._contextJump)
+			return;
+		clearTimeout(this._contextJump);
+		this._contextJump = null;
+		this._textArea.focus({ preventScroll: true });
+	},
+
+	// The editable is 1px tall and its text overflows below it: a region drawn over that
+	// text is read by a screen reader as part of the same line.
+	_placeContextRegions: function() {
+		if (!this._container || !this._contextBefore)
+			return;
+
+		const textArea = this._textArea;
+		const regions = Array.from(this._container.children).filter(function (child) {
+			return child.classList.contains('a11y-context');
+		});
+		const isBefore = function (region) {
+			return !!(region.compareDocumentPosition(textArea) & Node.DOCUMENT_POSITION_FOLLOWING);
+		};
+
+		// Each paragraph goes down to where the document draws it, but not over another one.
+		// Only Writer sends the rectangles in document coordinates.
+		const isText = this._map.getDocType() === 'text';
+		const containerRect = this._container.getBoundingClientRect();
+		const canvasRect = app.sectionContainer.getCanvasBoundingClientRect();
+		const getDocumentRect = function (span) {
+			if (!isText || !span.dataset.twips)
+				return null;
+			const twips = span.dataset.twips.split(',').map(Number);
+			return new cool.SimpleRectangle(twips[0], twips[1], twips[2], twips[3]);
+		};
+		const getDocumentTop = function (span) {
+			const rect = getDocumentRect(span);
+			return rect ? canvasRect.top + rect.v1Y / app.dpiScale - containerRect.top : NaN;
+		};
+		const getDocumentLeft = function (span) {
+			const rect = getDocumentRect(span);
+			return rect ? canvasRect.left + rect.v1X / app.dpiScale - containerRect.left : NaN;
+		};
+		const spread = function (region, top) {
+			region.style.top = top + 'px';
+			const spans = Array.from(region.children);
+			const heights = spans.map(function (span) { return span.offsetHeight; });
+			let bottom = top;
+			spans.forEach(function (span, index) {
+				const gap = Math.max(0, getDocumentTop(span) - bottom) || 0;
+				span.style.marginTop = gap + 'px';
+				bottom += gap + heights[index];
+			});
+			return bottom;
+		};
+
+		// not left of the paragraphs: the text starts far left with the caret on a wrapped line
+		const anySpan = this._contextBefore.firstElementChild
+			|| this._contextAfter.firstElementChild;
+		const pageLeft = anySpan ? getDocumentLeft(anySpan) : NaN;
+		const textLeft = textArea.offsetLeft + this._getTextOffsetX(0);
+		const left = (isNaN(pageLeft) ? textLeft : Math.max(textLeft, pageLeft)) + 'px';
+		regions.forEach(function (region) { region.style.left = left; });
+
+		let above = textArea.offsetTop;
+		regions.filter(isBefore).reverse().forEach(function (region) {
+			const first = region.firstElementChild;
+			const firstTop = first ? getDocumentTop(first) : NaN;
+			const top = isNaN(firstTop) ? above : firstTop;
+			const overlap = Math.max(0, spread(region, top) - above);
+			above = top - overlap;
+			region.style.top = above + 'px';
+		});
+
+		let below = textArea.offsetTop + textArea.scrollHeight;
+		regions.filter(function (region) { return !isBefore(region); }).forEach(function (region) {
+			below = spread(region, below);
+		});
 	},
 
 	onAccessibilityCaretChanged: function(nPos) {
@@ -384,16 +821,15 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 			eventDescription += '. ';
 			this._lastColSpan = colSpan;
 		}
-		this._setDescription(eventDescription);
+		this._setDescription(eventDescription + this._caretDescription());
+		this._caretDescribed = true;
 
-		var that = this;
-		this._timeoutForA11yDescription = setTimeout(function() {
-			that._setDescription('');
-		}, 1000);
+		this._timeoutForA11yDescription = setTimeout(this._describeCaretState.bind(this), 1000);
 	},
 
 	onAccessibilityFocusedCellChanged: function(outCount, inList, row, col, rowSpan, colSpan, paragraph) {
 		this._setFocusedParagraph(paragraph.content, parseInt(paragraph.position), parseInt(paragraph.start), parseInt(paragraph.end));
+		this._setHeadingLevel(paragraph.headingLevel);
 		this._updateTable(outCount, inList, row + 1, col + 1, rowSpan, colSpan);
 	},
 
@@ -517,15 +953,13 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 		if (children.length >= 3 && children[1].nodeName === '#text') {
 			if (children.length === 3) {
 				// When typing in an empty paragraph, we get <img>H<img>
-				var htmlContent = this.getHTML();
-				htmlContent = htmlContent.slice(this._preSpaceChar.length, -this._postSpaceChar.length);
-				this.setHTML(htmlContent);
+				this.setHTML(children[1].textContent);
 			}
 			else if (children.length === 4 && children[2].id === 'readable-content') {
 				// When typing, let's say 'k', at beginning of a not empty paragraph,
 				// we get: <img>k<span>Hello World</span><img>
 				var newText = children[1].textContent;
-				children[2].innerHTML = newText + children[2].innerHTML;
+				children[2].textContent = newText + children[2].textContent;
 				this._textArea.removeChild(children[1]);
 			}
 		}

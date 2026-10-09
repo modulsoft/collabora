@@ -167,6 +167,8 @@ interface AppInterface {
 		isSlideHidden(partNo: number): boolean;
 		areAllSlidesHidden(): boolean;
 		isSlideImportSupported(): boolean;
+		getSelectedSlidesCount(): number;
+		getSelectedSectionName(): string | null;
 	};
 	writer: {
 		compareDocumentProperties: CompareDocumentProperties | null;
@@ -231,21 +233,28 @@ interface AppInterface {
 	updateExportFormatsVisibility: () => void;
 	isExportEntryVisible: (id: string) => boolean;
 	languages: Array<{ translated: string; neutral: string; iso: string }>;
+	// The sentence checking rule packages the engine reports as installed.
+	sentenceCheckingPackages?: Array<{ id: string; locale: string }>;
+	// Whether this document is running with this user's own document
+	// settings. It is running with whoever opened it first's.
+	userPresetsApplied?: boolean;
+	// Whether a document settings change made now would be felt in this
+	// document, rather than waiting for the next one to be opened.
+	documentSettingsLive?: boolean;
 	favouriteLanguages: Array<string>;
 	tableStyles: TableStylesService;
-	impressTableStyles: ImpressTableStylesService;
+	tableStyleGallery: TableStyleGalleryService;
 	colorLastSelection: any;
 	serverAudit: any;
-	relatedDocuments: Array<{
-		wopiSrc: string;
-		// The document as the user knows it. A document the storage listed no
-		// address for holds a name and nothing else.
+	remoteLinks: Array<{
 		name?: string;
 		state: string;
 		lastModifiedTime?: string;
+		persistentLink: string;
+		access?: string;
 	}>;
-	// One-time token authorizing this view to call a POST to /cool/relateddocument
-	relatedDocumentToken: string;
+	// One-time token authorizing this view to call a POST to /cool/links
+	linkToken: string;
 	events: DocEvents;
 	showNavigator: boolean;
 
@@ -347,6 +356,11 @@ interface ErrorMessages {
 	};
 }
 
+interface PluralParseRule {
+	nplurals: number;
+	select: (n: number) => number;
+}
+
 // Accessibility validator interface for Cypress tests
 interface A11yValidator {
 	checkWidget(type: string, element: HTMLElement): void;
@@ -373,6 +387,7 @@ interface Window {
 		isTablet(): boolean;
 		isCODesktop(): boolean;
 		isChromebook(): boolean;
+		isInteractivePreview(): boolean;
 		getDeviceFormFactor(): string;
 	};
 	prefs: {
@@ -389,19 +404,28 @@ interface Window {
 		prefersDarkOS(): boolean;
 		hasExplicitDarkModePref(): boolean;
 		seedDarkModeDefault(): boolean;
+		spellOnlineForLoad(): string;
 	};
 	KeyboardShortcuts: KeyboardShortcuts;
+
+	PluralForms: {
+		parseRule: (header: string) => null | PluralParseRule;
+		defaultRule: PluralParseRule;
+	};
+	_n: (singular: string, plural: string, count: number) => string;
 
 	// The theme and the document background the load message carried.
 	themeSentWithLoad?: { theme: boolean; background: boolean };
 
 	starterScreen: boolean;
 	aiEthicalRatingMessage: boolean;
+	showAISidebar: boolean;
+	showAINotebookbar: boolean;
 	allowUpdateNotification: boolean;
 	autoShowWelcome: boolean;
 	bundlejsLoaded: boolean;
 	canvasSlideshowEnabled: boolean;
-	remoteDocumentsEnabled: boolean;
+	remoteLinksEnabled: boolean;
 	deeplEnabled: boolean;
 	documentSigningEnabled: boolean;
 	deviceFormFactor?: string;
@@ -426,6 +450,7 @@ interface Window {
 	protocolDebug: boolean;
 	routeToken: string;
 	mobileDialogId?: number;
+	savedUIState: boolean;
 	sidebarId: number;
 	userInterfaceMode: string;
 	ThisIsAMobileApp: boolean;
@@ -449,6 +474,8 @@ interface Window {
 	wopiHostId: string;
 	vendor: string;
 	copyrightYear: string;
+	WOPIPostmessageReady: boolean;
+	coolPreview: boolean;
 
 	socket: SockInterface;
 	errorMessages: ErrorMessages;
@@ -475,14 +502,43 @@ interface Window {
 		f: number,
 		g: number,
 	) => string;
+	getUNOCommand: (unoData: UnoCommand) => string;
+	getColorPickerData: (type: string) => any;
+	getConditionalFormatMenuElements: (
+		more: string,
+		dropdown: boolean,
+	) => HTMLElement;
+	getConditionalColorScaleMenuElements: (
+		more: string,
+		dropdown: boolean,
+	) => HTMLElement;
+	getConditionalDataBarMenuElements: (
+		more: string,
+		dropdown: boolean,
+	) => HTMLElement;
+	getConnectorsPopupElements: (
+		callback: EventListenerOrEventListenerObject,
+	) => HTMLElement;
+	getInsertTablePopupElements: (
+		callback: EventListenerOrEventListenerObject,
+	) => HTMLElement;
+	getShapesPopupElements: (
+		callback: EventListenerOrEventListenerObject,
+	) => HTMLElement;
+	editorUpdate: (e: Event) => void;
+	unoCmdToToolbarId: (name: string) => string;
 	L: any;
 	createWebSocket(url: string): SockInterface;
 	getAccessibilityState(): boolean;
+	getFocusRingColor(): string;
 	makeClientVisibleArea(): string;
 	postMobileDebug(msg: string): void;
 
 	removeAccessKey(text: string): string;
 	contextMenuWizard: boolean;
+
+	RenderManager: typeof RenderManager;
+	TextSelections: typeof TextSelections;
 }
 
 // For localization

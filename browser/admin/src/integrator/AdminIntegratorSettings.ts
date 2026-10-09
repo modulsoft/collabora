@@ -28,12 +28,24 @@ interface Window {
 	enableDebug?: boolean;
 	disableAISettings?: boolean;
 	wopiSettingBaseUrl?: string;
+	sentenceCheckingPackages?: Array<{ id: string; locale: string }>;
 	iframeType?: string;
 	cssVars?: string;
 	serviceRoot?: string;
 	versionHash?: string;
 	showLeftNav?: boolean;
 	scrollTarget?: string;
+	// False when this document is running with another user's document
+	// settings, because they opened it first.
+	userPresetsApplied?: boolean;
+	// False when a change made now would not be felt in this document.
+	documentSettingsLive?: boolean;
+	settingIframe?: SettingIframe;
+
+	WordBook?: WordBook;
+
+	Xcu: typeof Xcu;
+	SettingIframe: typeof SettingIframe;
 }
 
 interface ConfigItem {
@@ -51,6 +63,16 @@ interface ConfigData {
 	themes: ConfigItem[] | null;
 	extensions: ConfigItem[] | null;
 	spif: ConfigItem[] | null;
+	serverprivateinfo: ConfigItem[] | null;
+}
+
+interface ServerPrivateSettings {
+	ESignatureBaseUrl: string;
+	ESignatureClientId: string;
+	ESignatureSecret: string;
+	// True when the server holds a secret it did not send down. Travels with the
+	// file but is not part of it.
+	ESignatureSecretStored?: boolean;
 }
 
 interface ViewSettings {
@@ -75,14 +97,24 @@ interface ViewSettings {
 	aiImageProviderAPIKeyStored?: boolean;
 }
 
-// Secret view-setting fields the server never sends to the browser in
-// cleartext. Kept in sync with common/ViewSettings.hpp on the server.
-const SECRET_VIEW_SETTING_FIELDS = [
+// Secret fields the server holds but never sends to the browser in cleartext.
+// Each pairs with a "<field>Stored" flag: true on the way down when a value is
+// saved, and true on the way back when the field was left untouched and the
+// saved value stays. Kept in sync with common/ViewSettings.hpp and
+// common/ServerPrivateInfo.hpp on the server.
+const SECRET_SETTING_FIELDS = [
 	'aiProviderAPIKey',
 	'aiImageProviderAPIKey',
 	'zoteroAPIKey',
 	'signatureKey',
+	'ESignatureSecret',
 ];
+
+const SECRET_FIELDS_WITH_DELETE = ['aiProviderAPIKey', 'aiImageProviderAPIKey'];
+
+// Fills the locked field of a saved key. It is never sent: the key itself is
+// not in the browser, and the field is disabled while it shows this.
+const STORED_SECRET_MASK = '*'.repeat(16);
 
 interface AIProvider {
 	id: string;
@@ -98,6 +130,10 @@ interface AIProvider {
 interface SaveAllResult {
 	aiJustConfigured: boolean;
 	aiKeyMissing: boolean;
+	// Whether the document settings were written. A document reads those when
+	// it opens, so the one in front of the user can only take them by being
+	// told to read them again.
+	documentSettings: boolean;
 	// The view settings as the user entered them, captured before the upload
 	// re-fetch redacts the in-memory copy. Applied to the live session so a
 	// freshly entered secret is not lost.
@@ -191,8 +227,13 @@ const onMessage = (e) => {
 					'{"MessageId":"settings-show"}',
 					parentTargetOrigin(),
 				);
+			} else if (data.MessageId === 'settings-scope') {
+				// Someone joined or left the document while this was open.
+				window.userPresetsApplied = data.user_presets_applied !== false;
+				window.documentSettingsLive = data.document_settings_live !== false;
+				window.settingIframe?.refreshSettingsScope();
 			} else if (data.MessageId === 'settings-save-all') {
-				const settingIframe = (window as any).settingIframe as SettingIframe;
+				const settingIframe = window.settingIframe as SettingIframe;
 				if (settingIframe) {
 					settingIframe.saveAll().then((result) => {
 						window.parent.postMessage(
@@ -205,6 +246,7 @@ const onMessage = (e) => {
 								browserSettings: result.browserSettings,
 								aiJustConfigured: result.aiJustConfigured,
 								aiKeyMissing: result.aiKeyMissing,
+								documentSettings: result.documentSettings,
 							}),
 							parentTargetOrigin(),
 						);
@@ -234,7 +276,6 @@ const defaultBrowserSetting: Record<string, any> = {
 	darkTheme: false,
 	accessibilityState: false,
 	lockAccessibilityOn: false,
-	spellOnline: true,
 	smartZoom: true,
 	defaultZoom: {
 		value: 9,
@@ -247,6 +288,9 @@ const defaultBrowserSetting: Record<string, any> = {
 		A11yCheckDeck: false,
 		ShowNavigator: false,
 		ShowSidebar: true,
+		// A spreadsheet of codes and abbreviations produces mostly false
+		// positives, so Calc is the one document type this starts off in.
+		spellOnline: false,
 	},
 	text: {
 		ShowRuler: false,
@@ -257,6 +301,7 @@ const defaultBrowserSetting: Record<string, any> = {
 		StyleListDeck: false,
 		ShowFormattingMarks: false,
 		ShowAnnotations: true,
+		spellOnline: true,
 	},
 	presentation: {
 		ShowRuler: false,
@@ -268,6 +313,7 @@ const defaultBrowserSetting: Record<string, any> = {
 		// SdMasterPagesDeck: false,
 		// SdSlideTransitionDeck: false,
 		ShowAnnotations: true,
+		spellOnline: true,
 	},
 	drawing: {
 		ShowRuler: false,
@@ -276,6 +322,7 @@ const defaultBrowserSetting: Record<string, any> = {
 		ShowNavigator: false,
 		ShowSidebar: true,
 		ShowAnnotations: true,
+		spellOnline: true,
 	},
 };
 
@@ -514,6 +561,20 @@ try {
 	usesNativeCertStore = false;
 }
 
+const DEFAULT_PROVIDER = 'default';
+
+// Sizes the common image models accept. With none saved, the server uses
+// ai.image_size from coolwsd.xml, or else the first one here.
+const AI_IMAGE_SIZES = [
+	'1024x1024',
+	'1536x1024',
+	'1024x1536',
+	'1792x1024',
+	'1024x1792',
+	'512x512',
+	'256x256',
+];
+
 // Keep in sync with the pre-canned provider map in wsd/FileServer.cpp
 // fetchModels. The server ignores the baseUrl from the client for non-custom
 // providers and uses its own copy, so a caller cannot pair a pre-canned id
@@ -606,12 +667,20 @@ class SettingIframe {
 	// URL of the stored viewsetting.json, remembered when it is fetched so a save
 	// can tell the server where to read back any secret the user chose to keep.
 	private _viewSettingFileUrl = '';
+	private _serverPrivateSetting: ServerPrivateSettings =
+		SettingIframe.getDefaultServerPrivateSettings();
+	private _serverPrivateSection: HTMLElement | null = null;
+	// URL of the stored serverprivateinfo.json, remembered when it is fetched so
+	// a save can tell the server where to read back the secret the
+	// administrator chose to keep.
+	private _serverPrivateSettingFileUrl = '';
 	// Set when the user edits a chat AI field in this dialog session. Drives the
 	// View-tab / sidebar payoff so it fires on a real change, not on every save
 	// that happens to have a key already set. Set only by user input handlers,
 	// never by the load-time model auto-fetch.
 	private _aiConfigDirty = false;
 	private xcuInitializationAttempted = false;
+	private serverPrivateInfoInitializationAttempted = false;
 	private _aiModelFetchTimeout: number | null = null;
 	private _aiModelFetchAbort: AbortController | null = null;
 	private _aiModelFetchSeq = 0;
@@ -620,21 +689,30 @@ class SettingIframe {
 	private _aiImageModelFetchTimeout: number | null = null;
 	private _aiImageModelFetchAbort: AbortController | null = null;
 	private _aiImageModelFetchSeq = 0;
+	private _imageProviderMemo: {
+		url: string;
+		apiKey: string;
+		apiKeyStored: boolean;
+	} | null = null;
 	private _viewSettingLabels = {
 		zoteroAPIKey: 'Zotero',
 		signatureCert: _('Signature Certificate'),
 		signatureKey: _('Signature Key'),
 		signatureCa: _('Signature CA'),
 		aiProvider: _('Provider'),
-		aiProviderAPIKey: _('API Key'),
+		aiProviderAPIKey: _('API key'),
 		aiProviderModel: _('Model'),
 		aiProviderURL: _('Base URL'),
 		aiImageProvider: _('Provider'),
-		aiImageProviderAPIKey: _('API Key'),
+		aiImageProviderAPIKey: _('API key'),
 		aiImageProviderURL: _('Base URL'),
 		aiImageModel: _('Model'),
-		aiImageSize: _('Image Size'),
-		aiRequestTimeout: _('Request Timeout (seconds)'),
+		aiImageSize: _('Image size'),
+		aiRequestTimeout: _('Request timeout'),
+	};
+	private _serverPrivateSettingLabels: Record<string, string> = {
+		ESignatureClientId: _('Client ID'),
+		ESignatureSecret: _('Secret'),
 	};
 	private readonly settingLabels: Record<string, string> = {
 		lockAccessibilityOn: _('In-document Screen Reader'),
@@ -697,7 +775,298 @@ class SettingIframe {
 		RightPage: _('Right pages'),
 		Brochure: _('Brochure'),
 		BrochureRightToLeft: _('Brochure Right to Left'),
+
+		// The sentence checker panels are titled by the language they check.
+		// The names of the languages are translated; what is inside a panel
+		// is not, see settingTitles below.
+		en: _('English'),
+		hu_HU: _('Hungarian'),
+		pt_BR: _('Portuguese (Brazil)'),
+		ru_RU: _('Russian'),
 		// Add more as needed
+	};
+
+	/**!
+	 * The sentence checker options, as [label, help].
+	 *
+	 * Not translated, and deliberately so: each option names a notion of the
+	 * grammar of one language, and whoever has reason to set it is reading
+	 * that language already. Rendering the Hungarian options in Japanese
+	 * would mean inventing terms for notions the target language may not
+	 * have. The text is the rule package's own, printed by
+	 * lpcompile.py --emit-titles.
+	 *
+	 * Where a package gives an option no help of its own the label stands in
+	 * for both, which still says more than nothing when a narrow panel has
+	 * cut the label short.
+	 */
+	private readonly settingTitles: Record<string, [string, string]> = {
+		// en
+		'en-grammar': ['Possible mistakes', 'Check more grammar errors.'],
+		'en-cap': ['Capitalization', 'Check missing capitalization of sentences.'],
+		'en-dup': ['Word duplication', 'Check repeated words.'],
+		'en-pair': [
+			'Parentheses',
+			'Check missing or extra parentheses and quotation marks.',
+		],
+		'en-spaces': ['Word spacing', 'Check single spaces between words.'],
+		'en-mdash': [
+			'Em dash',
+			'Force unspaced em dash instead of spaced en dash.',
+		],
+		'en-quotation': [
+			'Quotation marks',
+			'Check double quotation marks: "x" → “x”',
+		],
+		'en-times': [
+			'Multiplication sign',
+			'Check true multipliction sign: 5x5 → 5×5',
+		],
+		'en-spaces2': [
+			'Sentence spacing',
+			'Check single spaces between sentences.',
+		],
+		'en-ndash': [
+			'En dash',
+			'Force spaced en dash instead of unspaced em dash.',
+		],
+		'en-apostrophe': [
+			'Apostrophe',
+			'Change typewriter apostrophe, single quotation marks and correct double primes.',
+		],
+		'en-ellipsis': ['Ellipsis', 'Change three dots with ellipsis.'],
+		'en-spaces3': [
+			'More spaces',
+			'Check more than two extra space characters between words and sentences.',
+		],
+		'en-minus': ['Minus sign', 'Change hyphen characters to real minus signs.'],
+		'en-metric': [
+			'Convert to metric (°C, km/h, m, kg, l)',
+			'Measurement conversion from °F, mph, ft, in, lb, gal and miles.',
+		],
+		'en-numsep': [
+			'Thousand separation of large numbers',
+			'Common (1000000 → 1,000,000) or ISO (1000000 → 1 000 000).',
+		],
+		'en-nonmetric': [
+			'Convert to non-metric (°F, mph, ft, lb, gal)',
+			'Measurement conversion from °C; km/h; cm, m, km; kg; l.',
+		],
+		// hu_HU
+		'hu_HU-cap': [
+			'Nagy kezdőbetű',
+			'Mondatok nagy kezdőbetűjének ellenőrzése.',
+		],
+		'hu_HU-par': ['Zárójelek', 'Zárójelpárok ellenőrzése.'],
+		'hu_HU-quot': [
+			'Idézőjelek',
+			'A magyar „külső” és »belső« idézőjelek ellenőrzése.',
+		],
+		'hu_HU-wordpart': [
+			'Egybe- és különírási javaslatok',
+			'Egybe- és különírási javaslatok',
+		],
+		'hu_HU-dash': [
+			'Nagykötőjel és gondolatjel',
+			'A kiskötőjel cseréje a nagykötőjelre (- → –).',
+		],
+		'hu_HU-comma': [
+			'Vesszőhasználatra vonatkozó javaslatok',
+			'A valószínűleg hiányzó és felesleges vesszők jelzése.',
+		],
+		'hu_HU-numpart': [
+			'Nagy számok tagolása szóközökkel',
+			'Ezrestagolás nem-törő szóközökkel (10000 → 10 000).',
+		],
+		'hu_HU-grammar': [
+			'Javaslat kevésbé egyértelmű esetben is',
+			'Javaslat kevésbé egyértelmű esetben is',
+		],
+		'hu_HU-style': ['Stílusellenőrzés', 'Stílusellenőrzés'],
+		'hu_HU-dup0': [
+			'Szóismétlés',
+			'Szóismétlés egymást közvetlenül követő szavak esetében.',
+		],
+		'hu_HU-compound': [
+			'Egyszerű nem szótári összetett szavak',
+			'Rövid, vagy rövid tagot tartalmazó, szóösszetételi szabályok alapján gyakran hibásan elfogadott alakok aláhúzása.',
+		],
+		'hu_HU-dup': [
+			'Szóismétlés tagmondaton belül',
+			'Szóismétlés tagmondaton belül',
+		],
+		'hu_HU-allcompound': [
+			'Minden nem szótári összetett szó',
+			'Minden szóösszetételi szabály alapján elfogadott alak aláhúzása.',
+		],
+		'hu_HU-dup2': ['Szóismétlés mondaton belül', 'Szóismétlés mondaton belül'],
+		'hu_HU-money': [
+			'Számok és átírásuk',
+			'A számmal és számnévvel is leírt mennyiség megegyezik-e? (Pl. 10, azaz tíz Ft.)',
+		],
+		'hu_HU-dup3': [
+			'Szóismétlés eltérő toldalékok esetén is',
+			'Szóismétlés eltérő toldalékok esetén is',
+		],
+		'hu_HU-SI': [
+			'Mértékegységek',
+			'Nem SI mértékegységek átalakítása (°F, mérföld, yard, láb, hüvelyk, gallon, pint, font súlyú).',
+		],
+		'hu_HU-hyphen': [
+			'Hiányzó elválasztás megadása',
+			'Nem egyértelműen elválasztható szóalakok elválasztásának megadása (pl. megint, fölül).',
+		],
+		'hu_HU-apost': [
+			'Aposztróf',
+			"Az írógépes aposztróf cseréje a tipográfiailag megfelelőre (' → ’).",
+		],
+		'hu_HU-spaces': [
+			'Dupla szóköz',
+			'Két vagy három ismétlődő szóköz cseréje egyre.',
+		],
+		'hu_HU-frac': [
+			'Törtek',
+			'Perjellel elválasztott törtek cseréje Unicode karakterre (1/2 → ½).',
+		],
+		'hu_HU-ligature': ['f-ligatúra javaslata', 'Csere Unicode f-ligatúrára.'],
+		'hu_HU-elli': [
+			'Három pont',
+			'Három pont cseréje az egalizált három pont karakterre (...→…).',
+		],
+		'hu_HU-spaces2': [
+			'Sok szóköz',
+			'Négy vagy több ismétlődő szóköz cseréje egy tabulátorra.',
+		],
+		'hu_HU-thin': [
+			'Keskeny szóköz',
+			'Keskeny szóköz (spácium) használata ezrestagoláshoz és más esetekben.',
+		],
+		'hu_HU-noligature': [
+			'f-ligatúra tiltása',
+			'Unicode f-ligatúra cseréje különálló betűkre.',
+		],
+		'hu_HU-idx': [
+			'Indexek',
+			'Számok cseréje mértékegységekben és kémiai képletekben valódi indexekre (m2 → m²).',
+		],
+		'hu_HU-minus': [
+			'Mínuszjel',
+			'Kötőjelek cseréje Unicode mínuszjelre a számok előtt.',
+		],
+		// ru_RU
+		'ru_RU-hyphen': [
+			'Дефис',
+			'Правописание слов через дефис, слитно или раздельно.',
+		],
+		'ru_RU-comma': [
+			'Пунктуация',
+			'Поиск ошибок в расстановке знаков препинания.',
+		],
+		'ru_RU-multiword': [
+			'Словосочетания',
+			'Правописание словосочетаний и устойчивых оборотов.',
+		],
+		'ru_RU-together': [
+			'Слитно/раздельно',
+			'Правописание слов слитно или раздельно.',
+		],
+		'ru_RU-common': ['Общие ошибки', 'Поиск прочих ошибок'],
+		'ru_RU-space': [
+			'Пробел',
+			'Поиск ошибок с пробелом: двойной пробел, пробел перед знаками пунктуации.',
+		],
+		'ru_RU-abbreviation': [
+			'Аббревиатуры',
+			'Аббревиатуры, сокращения и знаки пунктуации.',
+		],
+		'ru_RU-dup': ['Повтор слов', 'Поиск повторяющихся слов'],
+		'ru_RU-numsep': [
+			'Разделители групп разрядов (ISO) для чисел',
+			'Разделители групп разрядов (ISO) для больших чисел',
+		],
+		'ru_RU-typographica': [
+			'Типографика',
+			'Предлагать замену сочетаний знаков на специальные символы.',
+		],
+		'ru_RU-quotation': [
+			'Кавычки',
+			'Предлагать замену кавычек на кавычки-«ёлочки» или парные кавычки.',
+		],
+		// pt_BR
+		'pt_BR-grammar': ['Crase', 'Identificar o uso de crase.'],
+		'pt_BR-cap': [
+			'Maiúsculas',
+			'Procurar pela falta de letra maiúscula no inicio das frases.',
+		],
+		'pt_BR-dup': ['Palavras duplicadas', 'Procurar palavras repetidas.'],
+		'pt_BR-pair': [
+			'Parênteses',
+			'Procurar parênteses ou aspas a mais ou a menos.',
+		],
+		'pt_BR-spaces': [
+			'Espaço entre palavras',
+			'Verificar espaços entre palavras.',
+		],
+		'pt_BR-mdash': [
+			'Travessão',
+			'Forçar travessão não espaçado em vez de meio-traço espaçado.',
+		],
+		'pt_BR-quotation': ['Aspas Duplas', 'Verificar aspas duplas: "x" → “x”'],
+		'pt_BR-times': [
+			'Sinal de multiplicação',
+			'Verificar verdadeiro sinal de multiplicação: 5x5 → 5×5',
+		],
+		'pt_BR-spaces2': ['Espaço entre frases', 'Verificar espaços entre frases.'],
+		'pt_BR-ndash': [
+			'Meio-traço',
+			'Forçar meio-traço espaçado em vez de travessão não espaçado.',
+		],
+		'pt_BR-apostrophe': [
+			'Aspas simples',
+			'Alterar apóstrofo de máquina de escrever, aspas simples e corrigir primos duplos.',
+		],
+		'pt_BR-ellipsis': [
+			'Reticências',
+			'Alterar três pontos seguidos por reticências.',
+		],
+		'pt_BR-spaces3': [
+			'Espaços adicionais',
+			'Verificar por mais de dois espaços em branco entre palavras e frases.',
+		],
+		'pt_BR-minus': [
+			'Sinal de menos',
+			'Trocar hífen pelo verdadeiro sinal de menos.',
+		],
+		'pt_BR-metric': [
+			'Pleonasmos',
+			'Identificação de redundância de termos: Subir pra cima, encarar de frente, regra geral.',
+		],
+		'pt_BR-gerund': [
+			'Gerundismos',
+			'Emprego inapropriado do gerúndio: estarei trabalhando, vou estar fazendo.',
+		],
+		'pt_BR-nonmetric': ['Cacofonias', 'Som feio ou desagradável: por cada.'],
+		'pt_BR-paronimo': [
+			'Parônimos',
+			'Palavras parecidas na grafia ou na pronúncia, mas com significados diferentes.',
+		],
+		'pt_BR-composto': [
+			'Termos compostos',
+			'Identifica termos compostos escritos separados. Ex.: auto escola, sub contratado.',
+		],
+		'pt_BR-malmau': ['Mal ou Mau', 'Emprego de mal ou mau.'],
+		'pt_BR-aha': ['Há ou a', 'Emprego de há ou a.'],
+		'pt_BR-meiameio': ['Meia ou meio', 'Emprego de meia ou meio.'],
+		'pt_BR-verbo': ['Concordância verbal', 'Verifica a concordância verbal.'],
+		'pt_BR-pronominal': [
+			'Colocação Pronominal',
+			'Posição que os pronomes pessoais ocupam em relação ao verbo.',
+		],
+		'pt_BR-pronome': ['Uso de pronome', 'Emprego de pronome.'],
+		'pt_BR-porque': [
+			'Emprego do porquê',
+			'Identifica uso de porque, por que, porquê e por quê.',
+		],
 	};
 
 	// SVG templates for icons that are small and always present (no async load needed)
@@ -705,10 +1074,10 @@ class SettingIframe {
 		download: `<svg fill="currentColor" width="20" height="20" viewBox="0 0 24 24"><path d="M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z"></path></svg>`,
 		delete: `<svg fill="currentColor" width="20" height="20" viewBox="0 0 24 24"><path d="M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z"></path></svg>`,
 		edit: `<svg fill="currentColor" width="20" height="20" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75l11-11.03-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"></path></svg>`,
+		add: `<svg fill="currentColor" width="20" height="20" viewBox="0 0 24 24"><path d="M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z"></path></svg>`,
 		reset: `<svg fill="currentColor" width="24" height="24" viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 .34-.03.67-.08 1h2.02c.05-.33.06-.66.06-1 0-4.42-3.58-8-8-8zm-6 7c0-.34.03-.67.08-1H4.06c-.05.33-.06.66-.06 1 0 4.42 3.58 8 8 8v3l4-4-4-4v3c-3.31 0-6-2.69-6-6z"></path></svg>`,
 		checkboxMarked: `<svg fill="currentColor" width="24" height="24" viewBox="0 0 24 24"><path d="M10,17L5,12L6.41,10.58L10,14.17L17.59,6.58L19,8M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3Z"></path></svg>`,
 		checkboxBlankOutline: `<svg fill="currentColor" width="24" height="24" viewBox="0 0 24 24"><path d="M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,5V19H5V5H19Z"></path></svg>`,
-		info: `<svg fill="currentColor" width="24" height="24" viewBox="0 0 24 24"><path d="M11,9H13V7H11M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M11,17H13V11H11V17Z"></path></svg>`,
 	};
 	private _allConfigSection: HTMLElement | null;
 	private _sectionObserver: IntersectionObserver | null = null;
@@ -717,6 +1086,7 @@ class SettingIframe {
 	private _browserSettingSection: HTMLElement | null = null;
 	private _zoomSection: HTMLElement | null = null;
 	private _xcuSection: HTMLElement | null = null;
+	private _sentenceCheckerSection: HTMLElement | null = null;
 	private _aiSection: HTMLElement | null = null;
 	private _docSigningSection: HTMLElement | null = null;
 	private _zoteroSection: HTMLElement | null = null;
@@ -748,6 +1118,8 @@ class SettingIframe {
 		themesUpload: () => this.settingConfigBasePath() + '/themes/',
 		extensionsUpload: () => this.settingConfigBasePath() + '/extensions/',
 		spifUpload: () => this.settingConfigBasePath() + '/spif/',
+		serverPrivateSettingsUpload: () =>
+			this.settingConfigBasePath() + '/serverprivateinfo/',
 	};
 	private browserSettingOptions: Record<string, any> = {};
 	// The Interface Settings as browsersetting.json holds them, before the
@@ -809,8 +1181,10 @@ class SettingIframe {
 		}
 
 		// Document settings (XCU)
+		let documentSettings = false;
 		if (this.xcuEditor) {
 			saves.push(this.xcuEditor.generateXcuAndUpload());
+			documentSettings = true;
 		}
 
 		// View settings
@@ -821,9 +1195,22 @@ class SettingIframe {
 			),
 		);
 
+		// Electronic signature
+		if (this._serverPrivateSection) {
+			saves.push(
+				this.uploadServerPrivateSettingFile(this._serverPrivateSetting),
+			);
+		}
+
 		await Promise.all(saves);
 
-		return { aiJustConfigured, aiKeyMissing, viewSettings, browserSettings };
+		return {
+			aiJustConfigured,
+			aiKeyMissing,
+			documentSettings,
+			viewSettings,
+			browserSettings,
+		};
 	}
 
 	init(): void {
@@ -838,7 +1225,12 @@ class SettingIframe {
 			this.settingsStorage = new OnlineSettingsStorage();
 		}
 		this.fetchAndPopulateSharedConfigs();
-		this.wordbook = (window as any).WordBook;
+		this.wordbook = window.WordBook;
+	}
+
+	/// Called when the parent says the document's session count changed.
+	public refreshSettingsScope(): void {
+		this.updateNextDocumentNote();
 	}
 
 	public async uploadXcuFile(filename: string, content: string): Promise<void> {
@@ -900,6 +1292,19 @@ class SettingIframe {
 			read('disableAiSettings', 'disable_ai_settings') === 'true';
 		window.showLeftNav = read('showLeftNav', 'show_left_nav') === 'true';
 		window.scrollTarget = read('scrollTarget', 'scroll_target');
+		// Absent means yes: a host that does not send it is one where the
+		// question does not arise.
+		window.userPresetsApplied =
+			read('userPresetsApplied', 'user_presets_applied') !== 'false';
+		window.documentSettingsLive =
+			read('documentSettingsLive', 'document_settings_live') !== 'false';
+		try {
+			window.sentenceCheckingPackages = JSON.parse(
+				read('sentenceChecking', 'sentence_checking') || '[]',
+			);
+		} catch {
+			window.sentenceCheckingPackages = [];
+		}
 		window.wopiSettingBaseUrl = read(
 			'wopiSettingBaseUrl',
 			'wopi_setting_base_url',
@@ -1599,7 +2004,7 @@ class SettingIframe {
 				const contentsContainer = editorContainer.querySelector(
 					'#tab-contents-browserSetting',
 				) as HTMLElement;
-				contentsContainer.innerHTML = '';
+				contentsContainer.replaceChildren();
 				if (this.browserSettingOptions && this.browserSettingOptions[tab.id]) {
 					const renderedTree = this.renderSettingsOption(
 						this.browserSettingOptions[tab.id],
@@ -1696,33 +2101,6 @@ class SettingIframe {
 
 		return materialIconContainer;
 	}
-	// A small focusable info affordance that reveals explanatory text on hover
-	// or keyboard focus, keeping long guidance out of the form flow. The bubble
-	// is linked via aria-describedby so assistive tech reads it on focus.
-	private createInfoTooltip(text: string, bubbleId: string): HTMLElement {
-		const wrap = document.createElement('span');
-		/* todo: make it generic, remove ai- prefix, also adjust the css then. */
-		wrap.classList.add('ai-tip-wrap');
-
-		const button = document.createElement('button');
-		button.type = 'button';
-		button.classList.add('ai-info-tip');
-		button.setAttribute('aria-label', text);
-		button.setAttribute('aria-describedby', bubbleId);
-		button.appendChild(
-			this.createMaterialDesignIconContainer(this.SVG_ICONS.info),
-		);
-
-		const bubble = document.createElement('span');
-		bubble.id = bubbleId;
-		bubble.setAttribute('role', 'tooltip');
-		bubble.classList.add('ai-tip-bubble');
-		bubble.textContent = text;
-
-		wrap.appendChild(button);
-		wrap.appendChild(bubble);
-		return wrap;
-	}
 
 	private createButtonWithIcon(
 		id: string,
@@ -1741,7 +2119,7 @@ class SettingIframe {
 		if (isIconOnly) {
 			buttonEl.classList.add('button--icon-only');
 		} else {
-			buttonEl.classList.add('button--text-only');
+			buttonEl.classList.add('button--icon-and-text');
 		}
 		buttonEl.title = title;
 
@@ -1851,7 +2229,8 @@ class SettingIframe {
 			fieldset.classList.add('grid-options-fieldset');
 		}
 		const legend = document.createElement('legend');
-		legend.textContent = this.settingLabels[key] || key;
+		legend.textContent =
+			this.settingLabels[uniqueId] || this.settingLabels[key] || key;
 		fieldset.appendChild(legend);
 		const childContent = this.renderSettingsOption(value, uniqueId);
 		fieldset.appendChild(childContent);
@@ -1883,11 +2262,15 @@ class SettingIframe {
 		) => void,
 		isDisabled: boolean = false,
 		warningText: string | null = null,
+		helpText: string | null = null,
 	): HTMLSpanElement {
 		const checkboxWrapper = document.createElement('span');
 		checkboxWrapper.className = `checkbox-radio-switch checkbox-radio-switch-checkbox ${isChecked ? '' : 'checkbox-radio-switch--checked'} checkbox-wrapper`;
 		id = id.replace(/\s/g, '');
 		checkboxWrapper.id = id + '-container';
+		// On the row rather than the label, so the box answers to the pointer
+		// as well as the words beside it.
+		if (helpText) checkboxWrapper.title = helpText;
 
 		// Use the new helper here
 		const inputCheckbox = this.createCheckboxInput(id, isChecked, isDisabled);
@@ -1953,7 +2336,13 @@ class SettingIframe {
 		uniqueId: string,
 		data: any,
 	): HTMLSpanElement {
-		const labelText = this.settingLabels[key] || key;
+		const title = this.settingTitles[uniqueId];
+		const labelText =
+			(title && title[0]) ||
+			this.settingLabels[uniqueId] ||
+			this.settingLabels[key] ||
+			key;
+		const helpText = title ? title[1] : null;
 		let isDisabled = false;
 		let warningText: string | null = null;
 
@@ -1979,6 +2368,7 @@ class SettingIframe {
 			},
 			isDisabled,
 			warningText,
+			helpText,
 		);
 	}
 
@@ -2284,7 +2674,7 @@ class SettingIframe {
 		const listEl = document.getElementById(listId);
 		if (!listEl) return;
 
-		listEl.innerHTML = '';
+		listEl.replaceChildren();
 
 		items.forEach((item) => {
 			const fileName = this.getFilename(item.uri, false);
@@ -2449,6 +2839,98 @@ class SettingIframe {
 		);
 	}
 
+	private static getDefaultServerPrivateSettings(): ServerPrivateSettings {
+		return {
+			ESignatureBaseUrl: '',
+			ESignatureClientId: '',
+			ESignatureSecret: '',
+		};
+	}
+
+	// The fields an administrator edits here. The service address lives in the
+	// same file but is not offered for editing, and the stored-secret flag is
+	// not a field of its own.
+	private static readonly EDITABLE_SERVER_PRIVATE_FIELDS = [
+		'ESignatureClientId',
+		'ESignatureSecret',
+	] as const satisfies readonly (keyof ServerPrivateSettings)[];
+
+	private static serverPrivateSettingsFile(
+		settings: ServerPrivateSettings,
+	): File {
+		return new File([JSON.stringify(settings)], 'serverprivateinfo.json', {
+			type: 'application/json',
+			lastModified: Date.now(),
+		});
+	}
+
+	async uploadServerPrivateSettingFile(
+		settings: ServerPrivateSettings,
+	): Promise<void> {
+		await this.uploadFile(
+			this.PATH.serverPrivateSettingsUpload(),
+			SettingIframe.serverPrivateSettingsFile(settings),
+			this._serverPrivateSettingFileUrl,
+		);
+	}
+
+	private generateServerPrivateSettingUI(
+		data: ServerPrivateSettings,
+		settingsContainer: HTMLElement,
+	) {
+		this._serverPrivateSetting = data;
+
+		const container = document.createElement('div');
+		container.id = 'serverprivate-section';
+		container.classList.add('section');
+
+		container.appendChild(this.createHeading(_('Electronic Signature')));
+		const description = this.createParagraph(
+			_(
+				'Credentials for the electronic signature service. They are shared by everyone on this server.',
+			),
+		);
+		description.className = 'view-setting-description';
+		container.appendChild(description);
+
+		const editor = document.createElement('div');
+		editor.id = 'serverprivate-editor';
+		container.appendChild(editor);
+
+		for (const key of SettingIframe.EDITABLE_SERVER_PRIVATE_FIELDS) {
+			const field = this.createInputField(
+				key,
+				this._serverPrivateSettingLabels[key] || key,
+				data[key],
+				data,
+				false,
+				true,
+			);
+			editor.appendChild(field);
+		}
+
+		container.appendChild(
+			this.createSettingsActions(
+				'serverprivatesettings',
+				_('Electronic Signature'),
+				'serverprivateinfo.json',
+				// Reset keeps the stored address, which is not the admin's to change.
+				() => ({
+					...SettingIframe.getDefaultServerPrivateSettings(),
+					ESignatureBaseUrl: this._serverPrivateSetting.ESignatureBaseUrl,
+				}),
+				() => this._serverPrivateSetting,
+				(settings) => this.uploadServerPrivateSettingFile(settings),
+			),
+		);
+
+		this._serverPrivateSection = this.mountConfigSection(
+			settingsContainer,
+			this._serverPrivateSection,
+			container,
+		);
+	}
+
 	private generateDocSigningUI(
 		data: ViewSettings,
 		settingsContainer: HTMLElement,
@@ -2520,39 +3002,46 @@ class SettingIframe {
 		aiContainer.id = 'ai-section';
 		aiContainer.classList.add('section');
 
-		aiContainer.appendChild(this.createHeading(_('AI Assistant')));
+		const header = document.createElement('div');
+		header.classList.add('ai-section-header');
+		const intro = document.createElement('div');
+		intro.classList.add('ai-section-intro');
+		intro.appendChild(this.createHeading(_('AI Assistant')));
 		const aiDesc = document.createElement('p');
+		aiDesc.id = 'ai-description';
 		aiDesc.className = 'view-setting-description';
-		aiDesc.textContent = _(
-			'Configure AI provider credentials and model. Models are fetched automatically when credentials change.',
+		intro.appendChild(aiDesc);
+		header.appendChild(intro);
+		const resetButton = this.createButtonWithIcon(
+			'ai-reset-button',
+			'reset',
+			_('Reset'),
+			['button-primary'],
+			() => this.resetAIProviders(data, aiContainer),
 		);
-		aiContainer.appendChild(aiDesc);
+		resetButton.title = _('Use the AI provider set on the server');
+		header.appendChild(resetButton);
+		aiContainer.appendChild(header);
+
+		aiContainer.appendChild(this.createAIEmptyState(data, aiContainer));
 
 		const aiDivContainer = document.createElement('div');
 		aiDivContainer.id = 'ai-editor';
 		aiContainer.appendChild(aiDivContainer);
 
 		aiDivContainer.appendChild(this.createAISettingsBlock(data));
+		this.showAIEmptyState(
+			aiContainer,
+			!data.aiProviderURL && this.isImageProviderSameAsText(data, aiContainer),
+		);
 
 		aiContainer.appendChild(
 			this.createSettingsActions(
 				'ai',
 				_('AI Assistant'),
 				'viewsetting.json',
-				() => {
-					const defaultSettings = this.getDefaultViewSettings();
-					return {
-						...this._viewSetting,
-						aiProviderURL: defaultSettings.aiProviderURL,
-						aiProviderAPIKey: defaultSettings.aiProviderAPIKey,
-						aiProviderModel: defaultSettings.aiProviderModel,
-						aiImageProviderURL: defaultSettings.aiImageProviderURL,
-						aiImageProviderAPIKey: defaultSettings.aiImageProviderAPIKey,
-						aiImageModel: defaultSettings.aiImageModel,
-						aiImageSize: defaultSettings.aiImageSize,
-						aiRequestTimeout: defaultSettings.aiRequestTimeout,
-					};
-				},
+				// The section header has its own Reset.
+				null,
 				() => this._viewSetting,
 				(settings) =>
 					this.uploadViewSettingFile(
@@ -2566,6 +3055,80 @@ class SettingIframe {
 			this._aiSection,
 			aiContainer,
 		);
+	}
+
+	// Shown while the user has no provider of their own, so the one set on
+	// the server answers for both text and image generation.
+	private createAIEmptyState(
+		data: ViewSettings,
+		root: HTMLElement,
+	): HTMLDivElement {
+		const emptyState = document.createElement('div');
+		emptyState.id = 'ai-empty-state';
+
+		const header = document.createElement('div');
+		header.classList.add('ai-providers-header');
+		const title = document.createElement('span');
+		title.textContent = _('Providers');
+		const tag = document.createElement('span');
+		tag.classList.add('ai-badge', 'ai-admin-tag');
+		tag.textContent = _('Managed by your admin');
+		header.append(title, tag);
+		emptyState.appendChild(header);
+
+		const emptyTitle = document.createElement('div');
+		emptyTitle.classList.add('ai-empty-state-title');
+		emptyTitle.textContent = _('No providers added yet');
+		emptyState.appendChild(emptyTitle);
+
+		const emptyDesc = document.createElement('p');
+		emptyDesc.className = 'view-setting-description';
+		emptyDesc.textContent = _(
+			"Add a provider to start using AI for text generation, image generation, or both. Your administrator's provider is filled in for you.",
+		);
+		emptyState.appendChild(emptyDesc);
+
+		emptyState.appendChild(
+			this.createButtonWithIcon(
+				'ai-add-provider-button',
+				'add',
+				_('Add provider...'),
+				['button--vue-tertiary'],
+				() => this.addAIProvider(data, root),
+			),
+		);
+		return emptyState;
+	}
+
+	private showAIEmptyState(root: HTMLElement, empty: boolean): void {
+		const show = (selector: string, visible: boolean) => {
+			const el = root.querySelector(selector) as HTMLElement | null;
+			if (el) el.style.display = visible ? '' : 'none';
+		};
+		show('#ai-empty-state', empty);
+		show('#ai-editor', !empty);
+		show('#ai-reset-button', !empty);
+
+		const description = root.querySelector('#ai-description');
+		if (description) {
+			description.textContent = empty
+				? _('Choose the AI provider to use for text and image generation.')
+				: _(
+						'Use your own AI provider instead of the one set up by your administrator. This applies only to you.',
+					);
+		}
+	}
+
+	private addAIProvider(data: ViewSettings, root: HTMLElement): void {
+		const providerSelect = root.querySelector(
+			'#aiProvider',
+		) as HTMLSelectElement | null;
+		if (providerSelect) {
+			providerSelect.value = AI_PROVIDERS[0].id;
+			providerSelect.dispatchEvent(new Event('change'));
+		}
+		this.showAIEmptyState(root, false);
+		providerSelect?.focus();
 	}
 
 	private createViewSettingsTextBox(
@@ -2593,22 +3156,7 @@ class SettingIframe {
 
 		container.appendChild(this.createTextAIGroup(data));
 		container.appendChild(this.createImageAIGroup(data));
-
-		const timeoutBox = this.createViewSettingsTextBox(
-			'aiRequestTimeout',
-			data,
-			false,
-			true,
-		);
-		container.appendChild(timeoutBox);
-		const timeoutInput = timeoutBox.querySelector(
-			'#aiRequestTimeout',
-		) as HTMLInputElement | null;
-		if (timeoutInput) {
-			timeoutInput.placeholder = '300';
-			timeoutInput.type = 'number';
-			timeoutInput.min = '10';
-		}
+		container.appendChild(this.createRequestTimeoutField(data));
 
 		this.attachAISettingsAutoFetch(data, container);
 		this.attachAIImageSettingsAutoFetch(data, container);
@@ -2621,41 +3169,137 @@ class SettingIframe {
 		return container;
 	}
 
-	private createTextAIGroup(data: ViewSettings): HTMLFieldSetElement {
+	// A group of AI fields under a title, with the status of its model fetch
+	// beside the title. The group is named by the title alone, so the status
+	// is not read out as part of its name.
+	private createAIGroup(
+		id: string,
+		title: string,
+		statusId: string,
+	): HTMLFieldSetElement {
 		const group = document.createElement('fieldset');
 		group.classList.add('ai-settings-group');
-		const legend = document.createElement('legend');
-		legend.textContent = _('Text Generation');
-		group.appendChild(legend);
+		group.setAttribute('aria-labelledby', `${id}-title`);
 
-		const providerOptions = AI_PROVIDERS.map((provider) => ({
+		const legend = document.createElement('legend');
+		const titleEl = document.createElement('span');
+		titleEl.id = `${id}-title`;
+		titleEl.textContent = title;
+		legend.appendChild(titleEl);
+
+		const status = document.createElement('span');
+		status.id = statusId;
+		status.className = 'ai-badge ai-model-status';
+		status.setAttribute('role', 'status');
+		legend.appendChild(status);
+
+		group.appendChild(legend);
+		return group;
+	}
+
+	private createImageSizeField(data: ViewSettings): HTMLDivElement {
+		// A size saved by hand before this became a list stays on offer, so
+		// opening the dialog does not change it.
+		const sizes =
+			data.aiImageSize && !AI_IMAGE_SIZES.includes(data.aiImageSize)
+				? [...AI_IMAGE_SIZES, data.aiImageSize]
+				: AI_IMAGE_SIZES;
+		return this.createSelectField(
+			'aiImageSizecontainer',
+			this._viewSettingLabels.aiImageSize,
+			'aiImageSize',
+			sizes.map((size) => ({ value: size, label: size.replace('x', ' × ') })),
+			data.aiImageSize || AI_IMAGE_SIZES[0],
+			(selectEl) => {
+				data.aiImageSize = selectEl.value;
+			},
+		);
+	}
+
+	// A labelled dropdown, laid out like the text fields of createInputField.
+	private createSelectField(
+		containerId: string,
+		label: string,
+		selectId: string,
+		options: Array<{ value: string; label: string }>,
+		selectedValue: string,
+		onChangeHandler: (select: HTMLSelectElement) => void,
+	): HTMLDivElement {
+		const field = document.createElement('div');
+		field.id = containerId;
+		field.classList.add('view-input-container');
+
+		const heading = this.createHeading(label);
+		heading.classList.add('view-setting-small-label');
+		field.appendChild(heading);
+
+		// The wrapper draws the chevron, in the text colour of the theme.
+		const selectWrapper = document.createElement('div');
+		selectWrapper.classList.add('select-field');
+		selectWrapper.appendChild(
+			this.createSelectInput(selectId, options, selectedValue, onChangeHandler),
+		);
+		field.appendChild(selectWrapper);
+		return field;
+	}
+
+	private getAIProviderOptions(): Array<{ value: string; label: string }> {
+		return AI_PROVIDERS.map((provider) => ({
 			value: provider.id,
 			label: provider.name,
 		}));
+	}
 
-		const providerField = document.createElement('div');
-		providerField.id = 'aiProvidercontainer';
-		providerField.classList.add('view-input-container');
-
-		const providerHeading = this.createHeading(
-			this._viewSettingLabels.aiProvider,
+	private createRequestTimeoutField(data: ViewSettings): HTMLDivElement {
+		const field = this.createViewSettingsTextBox(
+			'aiRequestTimeout',
+			data,
+			false,
+			true,
 		);
-		providerHeading.classList.add('view-setting-small-label');
-		providerField.appendChild(providerHeading);
+		const input = field.querySelector(
+			'#aiRequestTimeout',
+		) as HTMLInputElement | null;
+		if (input) {
+			input.type = 'number';
+			input.min = '10';
+			input.placeholder = '300';
 
-		const providerSelect = this.createSelectInput(
-			'aiProvider',
-			providerOptions,
-			this.getProviderIdFromUrl(data.aiProviderURL),
-			(selectEl) => {
-				const provider = this.getProviderById(selectEl.value);
-				if (provider && !provider.isCustom) {
-					data.aiProviderURL = provider.baseUrl;
-				}
-			},
+			const row = document.createElement('div');
+			row.classList.add('ai-input-with-unit');
+			input.replaceWith(row);
+			const unit = document.createElement('span');
+			unit.textContent = _('seconds');
+			row.append(input, unit);
+		}
+		return field;
+	}
+
+	private createTextAIGroup(data: ViewSettings): HTMLFieldSetElement {
+		const group = this.createAIGroup(
+			'aiTextGroup',
+			_('Text generation'),
+			'ai-model-status',
 		);
-		providerField.appendChild(providerSelect);
-		group.appendChild(providerField);
+
+		group.appendChild(
+			this.createSelectField(
+				'aiProvidercontainer',
+				this._viewSettingLabels.aiProvider,
+				'aiProvider',
+				[
+					{ value: DEFAULT_PROVIDER, label: _('Default') },
+					...this.getAIProviderOptions(),
+				],
+				this.getSelectedProviderId(data, group),
+				(selectEl) => {
+					const provider = this.getProviderById(selectEl.value);
+					if (provider && !provider.isCustom) {
+						data.aiProviderURL = provider.baseUrl;
+					}
+				},
+			),
+		);
 
 		group.appendChild(
 			this.createViewSettingsTextBox('aiProviderURL', data, false, true),
@@ -2684,35 +3328,15 @@ class SettingIframe {
 		const apiKeyInput = group.querySelector(
 			'#aiProviderAPIKey',
 		) as HTMLInputElement | null;
-		if (apiKeyInput && !data.aiProviderAPIKeyStored) {
+		if (apiKeyInput) {
 			apiKeyInput.placeholder = _(
 				'Leave empty if your server does not require one',
 			);
 		}
 
-		const modelField = document.createElement('div');
-		modelField.id = 'aiModelcontainer';
-		modelField.classList.add('view-input-container');
-
-		const modelHeading = this.createHeading(
+		const modelField = this.createSelectField(
+			'aiModelcontainer',
 			this._viewSettingLabels.aiProviderModel,
-		);
-		modelHeading.classList.add('view-setting-small-label');
-
-		const modelLabelRow = document.createElement('div');
-		modelLabelRow.classList.add('ai-label-row');
-		modelLabelRow.appendChild(modelHeading);
-		modelLabelRow.appendChild(
-			this.createInfoTooltip(
-				_(
-					'For document actions (inspecting and editing), choose a model with native function/tool calling, such as gpt-4o, llama3.1, or qwen2.5. Models without it (e.g. base llama3, gemma) can still chat but cannot use document tools.',
-				),
-				'aiModelTip',
-			),
-		);
-		modelField.appendChild(modelLabelRow);
-
-		const modelSelect = this.createSelectInput(
 			'aiProviderModel',
 			this.initialModelOptions(data.aiProviderModel),
 			data.aiProviderModel || '',
@@ -2720,15 +3344,19 @@ class SettingIframe {
 				data.aiProviderModel = selectEl.value;
 			},
 		);
+		const modelSelect = modelField.querySelector('select') as HTMLSelectElement;
 		modelSelect.disabled = true;
-		modelField.appendChild(modelSelect);
+
+		const modelHint = document.createElement('p');
+		modelHint.id = 'aiModelHint';
+		modelHint.className = 'view-setting-description';
+		modelHint.textContent = _(
+			'To edit documents, pick a model with tool calling, e.g. gpt-4o or llama3.1. Models without it (e.g. base llama3, gemma) can still chat but cannot use document tools.',
+		);
+		modelSelect.setAttribute('aria-describedby', modelHint.id);
+		modelField.appendChild(modelHint);
 
 		group.appendChild(modelField);
-
-		const status = document.createElement('div');
-		status.id = 'ai-model-status';
-		status.className = 'ai-model-status';
-		group.appendChild(status);
 
 		if (this.getProviderIdFromUrl(data.aiProviderURL) === 'custom') {
 			this._lastCustomAIProviderURL = data.aiProviderURL;
@@ -2740,63 +3368,52 @@ class SettingIframe {
 	}
 
 	private createImageAIGroup(data: ViewSettings): HTMLFieldSetElement {
-		const group = document.createElement('fieldset');
-		group.classList.add('ai-settings-group');
-		const legend = document.createElement('legend');
-		legend.textContent = _('Image Generation');
-		group.appendChild(legend);
-
-		// Provider dropdown with "Same as Text AI" option
-		const imageProviderOptions = [
-			{ value: '', label: _('Same as Text AI') },
-			...AI_PROVIDERS.map((provider) => ({
-				value: provider.id,
-				label: provider.name,
-			})),
-		];
-
-		const providerField = document.createElement('div');
-		providerField.id = 'aiImageProvidercontainer';
-		providerField.classList.add('view-input-container');
-
-		const providerHeading = this.createHeading(
-			this._viewSettingLabels.aiImageProvider,
+		const group = this.createAIGroup(
+			'aiImageGroup',
+			_('Image generation'),
+			'ai-image-model-status',
 		);
-		providerHeading.classList.add('view-setting-small-label');
-		providerField.appendChild(providerHeading);
 
-		const selectedImageProvider = data.aiImageProviderURL
-			? this.getProviderIdFromUrl(data.aiImageProviderURL)
-			: '';
+		group.appendChild(
+			this.createCheckbox(
+				'aiImageSameAsText',
+				this.isImageProviderSameAsText(data, group),
+				_('Same as text provider'),
+				(inputCheckbox, checkboxWrapper) => {
+					checkboxWrapper.classList.toggle(
+						'checkbox-radio-switch--checked',
+						!inputCheckbox.checked,
+					);
+					this.applyImageProviderSameAsText(inputCheckbox.checked, data, group);
+				},
+			),
+		);
+		const providerFields = document.createElement('div');
+		providerFields.id = 'aiImageProviderFields';
+		group.appendChild(providerFields);
+		this._imageProviderMemo = null;
 
-		const providerSelect = this.createSelectInput(
-			'aiImageProvider',
-			imageProviderOptions,
-			selectedImageProvider,
-			(selectEl) => {
-				if (selectEl.value === '') {
-					data.aiImageProviderURL = '';
-				} else {
+		providerFields.appendChild(
+			this.createSelectField(
+				'aiImageProvidercontainer',
+				this._viewSettingLabels.aiImageProvider,
+				'aiImageProvider',
+				this.getAIProviderOptions(),
+				this.getProviderIdFromUrl(
+					data.aiImageProviderURL || data.aiProviderURL || '',
+				),
+				(selectEl) => {
 					const provider = this.getProviderById(selectEl.value);
 					if (provider && !provider.isCustom) {
 						data.aiImageProviderURL = provider.baseUrl;
 					}
-				}
-			},
+				},
+			),
 		);
-		providerField.appendChild(providerSelect);
-		group.appendChild(providerField);
 
-		group.appendChild(
+		providerFields.appendChild(
 			this.createViewSettingsTextBox('aiImageProviderURL', data, false, true),
 		);
-		const imageUrlContainer = group.querySelector(
-			'#aiImageProviderURLcontainer',
-		) as HTMLElement | null;
-		if (imageUrlContainer) {
-			imageUrlContainer.style.display =
-				selectedImageProvider === 'custom' ? 'block' : 'none';
-		}
 		const imageUrlInput = group.querySelector(
 			'#aiImageProviderURL',
 		) as HTMLInputElement | null;
@@ -2804,7 +3421,7 @@ class SettingIframe {
 			imageUrlInput.placeholder = _('e.g.') + ' http://localhost:11434';
 		}
 
-		group.appendChild(
+		providerFields.appendChild(
 			this.createViewSettingsTextBox(
 				'aiImageProviderAPIKey',
 				data,
@@ -2817,22 +3434,11 @@ class SettingIframe {
 		) as HTMLInputElement | null;
 		if (imageApiKeyInput) {
 			imageApiKeyInput.type = 'password';
-			if (!data.aiImageProviderAPIKeyStored) {
-				imageApiKeyInput.placeholder = _('Leave empty to use Text AI key');
-			}
 		}
 
-		const modelField = document.createElement('div');
-		modelField.id = 'aiImageModelcontainer';
-		modelField.classList.add('view-input-container');
-
-		const modelHeading = this.createHeading(
+		const modelField = this.createSelectField(
+			'aiImageModelcontainer',
 			this._viewSettingLabels.aiImageModel,
-		);
-		modelHeading.classList.add('view-setting-small-label');
-		modelField.appendChild(modelHeading);
-
-		const modelSelect = this.createSelectInput(
 			'aiImageModel',
 			this.initialModelOptions(data.aiImageModel),
 			data.aiImageModel || '',
@@ -2840,38 +3446,10 @@ class SettingIframe {
 				data.aiImageModel = selectEl.value;
 			},
 		);
-		modelSelect.disabled = true;
-		modelField.appendChild(modelSelect);
+		(modelField.querySelector('select') as HTMLSelectElement).disabled = true;
 		group.appendChild(modelField);
 
-		const status = document.createElement('div');
-		status.id = 'ai-image-model-status';
-		status.className = 'ai-model-status';
-		group.appendChild(status);
-
-		group.appendChild(
-			this.createViewSettingsTextBox('aiImageSize', data, false, true),
-		);
-		const imageSizeInput = group.querySelector(
-			'#aiImageSize',
-		) as HTMLInputElement | null;
-		if (imageSizeInput) {
-			imageSizeInput.placeholder = '1024x1024';
-			imageSizeInput.addEventListener('input', () => {
-				const val = imageSizeInput.value.trim();
-				if (val === '' || /^\d+x\d+$/.test(val)) {
-					const parts = val ? val.split('x') : [];
-					const valid =
-						val === '' || (Number(parts[0]) > 0 && Number(parts[1]) > 0);
-					imageSizeInput.style.borderColor = valid ? '' : 'red';
-					if (valid) {
-						data.aiImageSize = val;
-					}
-				} else {
-					imageSizeInput.style.borderColor = 'red';
-				}
-			});
-		}
+		group.appendChild(this.createImageSizeField(data));
 
 		if (
 			data.aiImageProviderURL &&
@@ -2879,6 +3457,8 @@ class SettingIframe {
 		) {
 			this._lastCustomAIImageProviderURL = data.aiImageProviderURL;
 		}
+
+		this.syncAIImageSettingsVisibility(data, group);
 
 		return group;
 	}
@@ -2893,6 +3473,12 @@ class SettingIframe {
 		) as HTMLElement | null;
 		if (customUrlContainer) {
 			customUrlContainer.style.display = isCustomProvider ? 'block' : 'none';
+		}
+		const isDefaultProvider =
+			this.getSelectedProviderId(data, root) === DEFAULT_PROVIDER;
+		for (const id of ['#aiProviderAPIKeycontainer', '#aiModelcontainer']) {
+			const field = root.querySelector(id) as HTMLElement | null;
+			if (field) field.style.display = isDefaultProvider ? 'none' : '';
 		}
 	}
 
@@ -2922,7 +3508,19 @@ class SettingIframe {
 
 		providerInput?.addEventListener('change', () => {
 			const selectedProvider = this.getProviderById(providerInput.value);
-			if (selectedProvider && !selectedProvider.isCustom) {
+			if (providerInput.value === DEFAULT_PROVIDER) {
+				data.aiProviderURL = '';
+				data.aiProviderModel = '';
+				data.aiProviderAPIKey = '';
+				data.aiProviderAPIKeyStored = false;
+				if (apiKeyInput) {
+					apiKeyInput.value = '';
+					apiKeyInput.placeholder = _(
+						'Leave empty if your server does not require one',
+					);
+				}
+				this.syncSecretField('aiProviderAPIKey', data, root);
+			} else if (selectedProvider && !selectedProvider.isCustom) {
 				if (customUrlInput) {
 					this._lastCustomAIProviderURL = customUrlInput.value;
 				}
@@ -2994,25 +3592,20 @@ class SettingIframe {
 		};
 
 		providerInput?.addEventListener('change', () => {
-			if (providerInput.value === '') {
-				// "Same as Text AI"
-				data.aiImageProviderURL = '';
-			} else {
-				const selectedProvider = this.getProviderById(providerInput.value);
-				if (selectedProvider && !selectedProvider.isCustom) {
-					if (customUrlInput) {
-						this._lastCustomAIImageProviderURL = customUrlInput.value;
-					}
-					data.aiImageProviderURL = selectedProvider.baseUrl;
-					if (customUrlInput) {
-						customUrlInput.value = selectedProvider.baseUrl;
-					}
-				} else if (customUrlInput) {
-					customUrlInput.value = this._lastCustomAIImageProviderURL;
-					data.aiImageProviderURL = customUrlInput.value;
-				} else {
-					data.aiImageProviderURL = '';
+			const selectedProvider = this.getProviderById(providerInput.value);
+			if (selectedProvider && !selectedProvider.isCustom) {
+				if (customUrlInput) {
+					this._lastCustomAIImageProviderURL = customUrlInput.value;
 				}
+				data.aiImageProviderURL = selectedProvider.baseUrl;
+				if (customUrlInput) {
+					customUrlInput.value = selectedProvider.baseUrl;
+				}
+			} else if (customUrlInput) {
+				customUrlInput.value = this._lastCustomAIImageProviderURL;
+				data.aiImageProviderURL = customUrlInput.value;
+			} else {
+				data.aiImageProviderURL = '';
 			}
 			this.syncAIImageSettingsVisibility(data, root);
 			queueFetch();
@@ -3022,6 +3615,7 @@ class SettingIframe {
 			data.aiImageProviderAPIKey = apiKeyInput.value;
 			// The typed value is now authoritative, not the stored one.
 			data.aiImageProviderAPIKeyStored = false;
+			this.syncAIImageKeyRequirement(data, root);
 			queueFetch();
 		});
 
@@ -3055,6 +3649,28 @@ class SettingIframe {
 		});
 	}
 
+	// Image generation borrows the Text Generation provider while it has no
+	// endpoint and no key of its own - what an empty aiImageProviderURL has
+	// always meant - so the checkbox reads and writes those fields.
+	//
+	// Once the section is on screen the checkbox answers, because the fields go
+	// through states the stored ones cannot tell apart: a custom provider whose
+	// URL has not been typed yet is empty too, and must not read as "same as
+	// text". The stored fields answer only while the section is being built.
+	private isImageProviderSameAsText(
+		data: ViewSettings,
+		root: ParentNode = document,
+	): boolean {
+		const checkbox = root.querySelector(
+			'#aiImageSameAsText-input',
+		) as HTMLInputElement | null;
+		return checkbox
+			? checkbox.checked
+			: !data.aiImageProviderURL &&
+					!data.aiImageProviderAPIKey &&
+					!data.aiImageProviderAPIKeyStored;
+	}
+
 	private syncAIImageSettingsVisibility(
 		data: ViewSettings,
 		root: ParentNode = document,
@@ -3069,6 +3685,98 @@ class SettingIframe {
 			imageUrlContainer.style.display =
 				imageProvider?.value === 'custom' ? 'block' : 'none';
 		}
+
+		const providerFields = root.querySelector(
+			'#aiImageProviderFields',
+		) as HTMLElement | null;
+		if (providerFields) {
+			providerFields.style.display = this.isImageProviderSameAsText(data, root)
+				? 'none'
+				: 'block';
+		}
+
+		this.syncAIImageKeyRequirement(data, root);
+	}
+
+	private imageInheritsTextProvider(data: ViewSettings): boolean {
+		return (
+			!data.aiImageProviderURL ||
+			this.normalizeBaseUrl(data.aiImageProviderURL) ===
+				this.normalizeBaseUrl(data.aiProviderURL || '')
+		);
+	}
+
+	private syncAIImageKeyRequirement(
+		data: ViewSettings,
+		root: ParentNode = document,
+	): void {
+		const apiKeyInput = root.querySelector(
+			'#aiImageProviderAPIKey',
+		) as HTMLInputElement | null;
+		if (!apiKeyInput) {
+			return;
+		}
+
+		const imageProvider = root.querySelector(
+			'#aiImageProvider',
+		) as HTMLSelectElement | null;
+		const required =
+			!this.imageInheritsTextProvider(data) &&
+			imageProvider?.value !== 'custom';
+		const hasKey =
+			!!data.aiImageProviderAPIKey || !!data.aiImageProviderAPIKeyStored;
+		const missing = required && !hasKey;
+
+		apiKeyInput.required = required;
+		apiKeyInput.setAttribute('aria-invalid', missing ? 'true' : 'false');
+		apiKeyInput.classList.toggle('view-input-invalid', missing);
+		apiKeyInput.placeholder = data.aiImageProviderAPIKeyStored
+			? '********'
+			: required
+				? _('Required for this provider')
+				: _('Leave empty if your server does not require one');
+	}
+
+	private applyImageProviderSameAsText(
+		sameAsText: boolean,
+		data: ViewSettings,
+		root: ParentNode,
+	): void {
+		const memo = this._imageProviderMemo;
+		this._imageProviderMemo = sameAsText
+			? {
+					url: data.aiImageProviderURL,
+					apiKey: data.aiImageProviderAPIKey,
+					apiKeyStored: !!data.aiImageProviderAPIKeyStored,
+				}
+			: null;
+
+		const url = sameAsText
+			? ''
+			: memo?.url || data.aiProviderURL || this.getDefaultAIProviderURL();
+		data.aiImageProviderURL = url;
+		data.aiImageProviderAPIKey = sameAsText ? '' : memo?.apiKey || '';
+		data.aiImageProviderAPIKeyStored = sameAsText
+			? false
+			: !!memo?.apiKeyStored;
+		if (url && this.getProviderIdFromUrl(url) === 'custom') {
+			this._lastCustomAIImageProviderURL = url;
+		}
+
+		const setValue = (selector: string, value: string) => {
+			const field = root.querySelector(selector) as
+				| HTMLInputElement
+				| HTMLSelectElement
+				| null;
+			if (field) field.value = value;
+		};
+		if (url) setValue('#aiImageProvider', this.getProviderIdFromUrl(url));
+		setValue('#aiImageProviderURL', url);
+		setValue('#aiImageProviderAPIKey', data.aiImageProviderAPIKey);
+		this.syncSecretField('aiImageProviderAPIKey', data, root);
+
+		this.syncAIImageSettingsVisibility(data, root);
+		this.scheduleAIImageModelFetch(data);
 	}
 
 	private scheduleAIModelFetch(data: ViewSettings): void {
@@ -3094,8 +3802,10 @@ class SettingIframe {
 		const effectiveUrl =
 			this.normalizeBaseUrl(data.aiImageProviderURL || '') ||
 			this.normalizeBaseUrl(data.aiProviderURL || '');
+		const inheritsTextProvider = this.imageInheritsTextProvider(data);
 		const effectiveKey =
-			data.aiImageProviderAPIKey || data.aiProviderAPIKey || '';
+			data.aiImageProviderAPIKey ||
+			(inheritsTextProvider ? data.aiProviderAPIKey : '');
 		const effectiveProviderId = this.getProviderIdFromUrl(effectiveUrl);
 		const provider = this.getProviderById(effectiveProviderId);
 		const isCustom = provider?.isCustom ?? effectiveProviderId === 'custom';
@@ -3103,7 +3813,7 @@ class SettingIframe {
 		// Which saved key the server should read back: image key, else chat key.
 		const storedImageSecretField = data.aiImageProviderAPIKeyStored
 			? 'aiImageProviderAPIKey'
-			: data.aiProviderAPIKeyStored
+			: inheritsTextProvider && data.aiProviderAPIKeyStored
 				? 'aiProviderAPIKey'
 				: '';
 		const canUseStoredKey =
@@ -3112,7 +3822,16 @@ class SettingIframe {
 		// As for text: a custom (self-hosted) image provider lists models with
 		// just a base URL; the pre-canned cloud providers still need a key.
 		if (!effectiveUrl || (!isCustom && !effectiveKey && !canUseStoredKey)) {
-			this.setAIImageStatus('', 'hidden');
+			// Say which of the two it is, so a provider picked here without a key
+			// of its own does not just sit there with an empty model list.
+			if (effectiveUrl && !isCustom && !inheritsTextProvider) {
+				this.setAIImageStatus(
+					_('Enter an API key for this provider to list its models.'),
+					'error',
+				);
+			} else {
+				this.setAIImageStatus('', 'hidden');
+			}
 			this.resetAIImageModelSelect(data.aiImageModel);
 			return;
 		}
@@ -3195,7 +3914,7 @@ class SettingIframe {
 			data.aiImageModel = selectedModel;
 			this.updateAIImageModelSelect(modelIds, selectedModel);
 
-			this.setAIImageStatus(_('Models fetched successfully'), 'success');
+			this.setAIImageStatus(_('Connected'), 'success');
 		} catch (error) {
 			if ((error as any)?.name === 'AbortError') {
 				return;
@@ -3209,6 +3928,10 @@ class SettingIframe {
 
 	private async fetchAIModels(data: ViewSettings): Promise<void> {
 		const providerId = this.getSelectedProviderId(data);
+		if (providerId === DEFAULT_PROVIDER) {
+			this.setAIStatus('', 'hidden');
+			return;
+		}
 		const provider = this.getProviderById(providerId);
 		if (!provider) {
 			this.setAIStatus(_('Invalid provider configuration'), 'error');
@@ -3307,7 +4030,7 @@ class SettingIframe {
 			data.aiProviderModel = selectedModel;
 			this.updateAIModelSelect(modelIds, selectedModel);
 
-			this.setAIStatus(_('Models fetched successfully'), 'success');
+			this.setAIStatus(_('Connected'), 'success');
 		} catch (error) {
 			if ((error as any)?.name === 'AbortError') {
 				return;
@@ -3326,7 +4049,7 @@ class SettingIframe {
 		if (!modelSelect) {
 			return;
 		}
-		modelSelect.innerHTML = '';
+		modelSelect.replaceChildren();
 		modelIds.forEach((modelId) => {
 			const option = document.createElement('option');
 			option.value = modelId;
@@ -3345,7 +4068,7 @@ class SettingIframe {
 			'aiImageModel',
 		) as HTMLSelectElement | null;
 		if (!select) return;
-		select.innerHTML = '';
+		select.replaceChildren();
 		const noneOpt = document.createElement('option');
 		noneOpt.value = '';
 		noneOpt.textContent = _('None (disable image generation)');
@@ -3376,7 +4099,7 @@ class SettingIframe {
 		select: HTMLSelectElement,
 		storedModel: string,
 	): void {
-		select.innerHTML = '';
+		select.replaceChildren();
 		this.initialModelOptions(storedModel).forEach((opt) => {
 			const option = document.createElement('option');
 			option.value = opt.value;
@@ -3493,6 +4216,122 @@ class SettingIframe {
 	// sections (heading only) so the left navbar can be built straight away,
 	// then with the real data to fill each section in. The headings are there
 	// from the start, so the navbar doesn't change as each section loads.
+	/**!
+	 * One panel per installed rule package. A package the engine does not have
+	 * gets no panel, which is why the list comes from the engine rather than
+	 * from the option table the labels live in.
+	 *
+	 * Named for the checker rather than for the job, because it is not the
+	 * only sentence checker the dialog will carry: the remote ones get
+	 * sections of their own.
+	 */
+	private createSentenceCheckerSection(): HTMLElement | null {
+		if (!this.xcuEditor) return null;
+
+		// The engine answers with the packages it has, in an order that means
+		// nothing to a reader. Sort by the name each one is shown under, in
+		// the reader's own language, so the list reads the way they expect
+		// rather than the way a directory happened to be read back.
+		const packages = (window.sentenceCheckingPackages || [])
+			.slice()
+			.sort((a, b) =>
+				(this.settingLabels[a.id] || a.id).localeCompare(
+					this.settingLabels[b.id] || b.id,
+				),
+			);
+
+		const panels: HTMLElement[] = [];
+		for (const entry of packages) {
+			const group = this.xcuEditor.getSentenceCheckingGroup(entry.id);
+			if (!group) continue;
+			const rendered = this.renderSettingsOption(group, entry.id);
+			rendered.classList.add('xcu-settings-grid');
+			panels.push(
+				this.createFieldsetFor(
+					this.settingLabels[entry.id] || entry.id,
+					rendered,
+				),
+			);
+		}
+
+		// A heading over nothing is worse than no heading: with no rule
+		// package installed there is nothing here to choose.
+		if (!panels.length) return null;
+
+		const section = document.createElement('div');
+		section.id = 'lightproof';
+		section.className = 'section';
+		section.appendChild(this.createHeading(_('Lightproof Sentence Checker')));
+		section.appendChild(
+			this.createParagraph(
+				_('Choose what the sentence checker looks for as you type.'),
+			),
+		);
+		section.appendChild(this.createNextDocumentNote());
+		for (const panel of panels) section.appendChild(panel);
+		return section;
+	}
+
+	/**!
+	 * Said only when a change would not be felt in the document in front of
+	 * them, which is the case that needs explaining. Alone with a document
+	 * running on their own settings they get no note, because saving applies
+	 * the change here and now.
+	 *
+	 * There are two ways to be short of that. A document opened by another
+	 * session is not running on this user's settings at all. A document that
+	 * is running on them, but is open in more than one place, would have them
+	 * changed under whoever else is there, so it waits.
+	 *
+	 * Neither text says who the others are: another window of this user's own
+	 * is a session like any other, and the dialog cannot tell the two apart.
+	 */
+	private createNextDocumentNote(): HTMLElement {
+		const note = this.createParagraph('');
+		note.className = 'settings-scope-note';
+		this.updateNextDocumentNote();
+		return note;
+	}
+
+	/**!
+	 * People join and leave while the dialog is open, so the note is written
+	 * again whenever the parent says the answer has changed. Every note in
+	 * the page is written: the sections are built more than once while the
+	 * dialog fills in, and a note left over from an earlier build must not go
+	 * on saying the opposite of the one beside it.
+	 */
+	private updateNextDocumentNote(): void {
+		const text =
+			window.userPresetsApplied === false
+				? _(
+						'This document is using the document settings it was opened with. What you change here applies to the next document you open.',
+					)
+				: _(
+						'This document is open in more than one window, so what you change here applies to the next document you open rather than this one.',
+					);
+		const hidden = window.documentSettingsLive !== false;
+
+		document
+			.querySelectorAll<HTMLElement>('.settings-scope-note')
+			.forEach((note) => {
+				note.textContent = text;
+				note.hidden = hidden;
+			});
+	}
+
+	private createFieldsetFor(
+		legendText: string,
+		content: HTMLElement,
+	): HTMLElement {
+		const fieldset = document.createElement('fieldset');
+		fieldset.classList.add('xcu-settings-fieldset');
+		const legend = document.createElement('legend');
+		legend.textContent = legendText;
+		fieldset.appendChild(legend);
+		fieldset.appendChild(content);
+		return fieldset;
+	}
+
 	private async populateSharedConfigUI(data: ConfigData | null): Promise<void> {
 		const settingsContainer = this._allConfigSection;
 		if (!settingsContainer) return;
@@ -3547,54 +4386,82 @@ class SettingIframe {
 			}
 		}
 
-		// Document settings (xcu)
-		if (!isCODesktop) {
+		// Document settings (xcu), and the sentence checker options, which are
+		// kept in the same file. The apps show the second but not the first:
+		// their document settings are reached from the menus instead.
+		{
 			if (!data) {
-				this._xcuSection = this.createEmptySection(
-					this._xcuSection,
-					'xcu-section',
-					_('Document Settings'),
-				);
-			} else if (data.xcu && data.xcu.length > 0) {
-				const xcuFileContent = await this.settingsStorage.fetchSettingFile(
-					data.xcu[0].uri,
-				);
-				this.xcuEditor = new (window as any).Xcu(
-					this.getFilename(data.xcu[0].uri, false),
-					xcuFileContent,
-				);
-
-				const xcuContainer = document.createElement('div');
-				xcuContainer.id = 'xcu-section';
-				xcuContainer.classList.add('section');
-				const xcuSection = this.xcuEditor.createXcuEditorUI(xcuContainer);
-				this.appendXcuDebugUploadControls(xcuContainer, data);
-
-				this._xcuSection = this.mountConfigSection(
-					settingsContainer,
-					this._xcuSection,
-					xcuSection,
-				);
+				if (!isCODesktop)
+					this._xcuSection = this.createEmptySection(
+						this._xcuSection,
+						'xcu-section',
+						_('Document Settings'),
+					);
 			} else {
-				// If user doesn't have any xcu file, we generate with default settings...
-				try {
-					if (!this.xcuInitializationAttempted) {
-						this.xcuInitializationAttempted = true;
-						this.xcuEditor = new (window as any).Xcu('documentView.xcu', null);
-						await this.xcuEditor.generateXcuAndUpload();
-						return await this.fetchAndPopulateSharedConfigs();
-					} else {
+				if (data.xcu && data.xcu.length > 0) {
+					const xcuFileContent = await this.settingsStorage.fetchSettingFile(
+						data.xcu[0].uri,
+					);
+					this.xcuEditor = new window.Xcu(
+						this.getFilename(data.xcu[0].uri, false),
+						xcuFileContent,
+					);
+
+					if (!isCODesktop) {
+						const xcuContainer = document.createElement('div');
+						xcuContainer.id = 'xcu-section';
+						xcuContainer.classList.add('section');
+						const xcuSection = this.xcuEditor.createXcuEditorUI(xcuContainer);
+						xcuSection.appendChild(this.createNextDocumentNote());
+						this.appendXcuDebugUploadControls(xcuContainer, data);
+
+						this._xcuSection = this.mountConfigSection(
+							settingsContainer,
+							this._xcuSection,
+							xcuSection,
+						);
+					}
+				} else if (!isCODesktop) {
+					// If user doesn't have any xcu file, we generate with default settings...
+					try {
+						if (!this.xcuInitializationAttempted) {
+							this.xcuInitializationAttempted = true;
+							this.xcuEditor = new window.Xcu('documentView.xcu', null);
+							await this.xcuEditor.generateXcuAndUpload();
+							return await this.fetchAndPopulateSharedConfigs();
+						} else {
+							this._xcuSection?.remove();
+							this._xcuSection = null;
+							console.warn('XCU file not found and automatic creation failed.');
+						}
+					} catch (error) {
+						console.error(
+							'Something went wrong while generating or uploading xcu file:',
+							error,
+						);
 						this._xcuSection?.remove();
 						this._xcuSection = null;
-						console.warn('XCU file not found and automatic creation failed.');
 					}
-				} catch (error) {
-					console.error(
-						'Something went wrong while generating or uploading xcu file:',
-						error,
+				} else {
+					// The apps have no xcu until something writes one, and their
+					// upload is a one-way message to the shell, so writing one
+					// here and reloading would race it. Edit in memory instead;
+					// saving writes the file through the same message.
+					this.xcuEditor = new window.Xcu('documentView.xcu', null);
+				}
+
+				// The sentence checker options do not need the file to exist:
+				// an option nobody has set yet falls back to its schema default.
+				const sentenceChecker = this.createSentenceCheckerSection();
+				if (sentenceChecker) {
+					this._sentenceCheckerSection = this.mountConfigSection(
+						settingsContainer,
+						this._sentenceCheckerSection,
+						sentenceChecker,
 					);
-					this._xcuSection?.remove();
-					this._xcuSection = null;
+				} else {
+					this._sentenceCheckerSection?.remove();
+					this._sentenceCheckerSection = null;
 				}
 			}
 		}
@@ -3626,10 +4493,15 @@ class SettingIframe {
 					}
 				}
 				this._viewSetting = viewSetting;
+				// A key or model saved without a URL is OpenAI's, as shown before.
 				this._viewSetting.aiProviderURL =
 					this.normalizeBaseUrl(viewSetting.aiProviderURL || '') ||
-					this.getDefaultAIProviderURL();
-				// An empty image URL means "Same as Text AI", so keep it empty
+					(viewSetting.aiProviderAPIKey ||
+					viewSetting.aiProviderAPIKeyStored ||
+					viewSetting.aiProviderModel
+						? this.getDefaultAIProviderURL()
+						: '');
+				// An empty image URL means "Same as text provider", so keep it empty
 				// rather than falling back to a default.
 				this._viewSetting.aiImageProviderURL = this.normalizeBaseUrl(
 					viewSetting.aiImageProviderURL || '',
@@ -3642,6 +4514,55 @@ class SettingIframe {
 		// Autotext, Custom dictionaries and Document themes
 		if (!isCODesktop) {
 			this.insertConfigSections(data);
+		}
+
+		if (!isUserConfig && !isCODesktop && data && this.isAdmin()) {
+			let stored: any = null;
+			this._serverPrivateSettingFileUrl =
+				data.serverprivateinfo && data.serverprivateinfo.length > 0
+					? data.serverprivateinfo[0].uri
+					: '';
+			if (data.serverprivateinfo && data.serverprivateinfo.length > 0) {
+				const content = await this.settingsStorage.fetchSettingFile(
+					data.serverprivateinfo[0].uri,
+				);
+				if (content !== null) {
+					stored = {};
+					if (content.trim()) {
+						try {
+							stored = JSON.parse(content);
+						} catch (error) {
+							console.error('Could not read serverprivateinfo.json', error);
+						}
+					}
+				}
+			}
+			if (stored === null && !this.serverPrivateInfoInitializationAttempted) {
+				this.serverPrivateInfoInitializationAttempted = true;
+				try {
+					await this.settingsStorage.uploadSettings(
+						this.PATH.serverPrivateSettingsUpload(),
+						SettingIframe.serverPrivateSettingsFile(
+							SettingIframe.getDefaultServerPrivateSettings(),
+						),
+					);
+					return await this.fetchAndPopulateSharedConfigs();
+				} catch (error) {
+					console.error('Could not create serverprivateinfo.json', error);
+				}
+			}
+
+			if (stored !== null) {
+				this.generateServerPrivateSettingUI(
+					{
+						ESignatureBaseUrl: stored.ESignatureBaseUrl || '',
+						ESignatureClientId: stored.ESignatureClientId || '',
+						ESignatureSecret: stored.ESignatureSecret || '',
+						ESignatureSecretStored: !!stored.ESignatureSecretStored,
+					},
+					settingsContainer,
+				);
+			}
 		}
 
 		// Document Signing and Zotero
@@ -3849,7 +4770,7 @@ class SettingIframe {
 			'signatureCa',
 		].includes(key);
 
-		const isSecretField = SECRET_VIEW_SETTING_FIELDS.includes(key);
+		const isSecretField = SECRET_SETTING_FIELDS.includes(key);
 		const storedFlag = `${key}Stored`;
 		const hasStoredSecret = isSecretField && !!(data as any)[storedFlag];
 
@@ -3893,17 +4814,88 @@ class SettingIframe {
 			if (isSecretField) {
 				input.type = 'password';
 			}
-			container.appendChild(input);
+			container.appendChild(
+				SECRET_FIELDS_WITH_DELETE.includes(key)
+					? this.createSecretInputRow(input, key, label, data)
+					: input,
+			);
 		}
 
 		return container;
+	}
+	// Input with delete button to reset.
+	private createSecretInputRow(
+		input: HTMLInputElement,
+		key: string,
+		label: string,
+		data: any,
+	): HTMLDivElement {
+		const row = document.createElement('div');
+		row.classList.add('secret-input-row');
+
+		const storedFlag = `${key}Stored`;
+		const syncField = () => this.syncSecretField(key, data, row);
+
+		// The trash icon comes from the stylesheet, which picks the light or
+		// dark version for the theme.
+		const deleteButton = document.createElement('button');
+		deleteButton.type = 'button';
+		deleteButton.id = `${key}-delete`;
+		deleteButton.classList.add(
+			'button',
+			'button--icon-only',
+			'button--vue-tertiary',
+			'secret-delete-button',
+		);
+		deleteButton.title = _('Delete {0}').replace('{0}', label);
+		deleteButton.setAttribute('aria-label', deleteButton.title);
+		deleteButton.addEventListener('click', () => {
+			input.value = '';
+			data[key] = '';
+			data[storedFlag] = false;
+			syncField();
+			input.dispatchEvent(new Event('input', { bubbles: true }));
+			input.focus();
+		});
+
+		input.addEventListener('input', syncField);
+
+		row.appendChild(input);
+		row.appendChild(deleteButton);
+		syncField();
+		return row;
+	}
+
+	// The one rule for a secret field and its delete button, for the field's
+	// own input event and for the places that change it without the user
+	// typing in it. A saved key shows as a filled, locked field: deleting it
+	// is how to enter a new one. Nothing to clear, nothing to press.
+	private syncSecretField(
+		key: string,
+		data: any,
+		root: ParentNode = document,
+	): void {
+		const input = root.querySelector(`#${key}`) as HTMLInputElement | null;
+		const button = root.querySelector(
+			`#${key}-delete`,
+		) as HTMLButtonElement | null;
+		const stored = !!data[`${key}Stored`];
+		if (input) {
+			if (stored) input.value = STORED_SECRET_MASK;
+			else if (input.disabled) input.value = data[key] || '';
+			input.disabled = stored;
+		}
+		if (button) {
+			button.disabled = !stored && !input?.value;
+		}
 	}
 
 	private createSettingsActions(
 		prefix: string,
 		settingsName: string,
 		filename: string,
-		getDefaultSettings: () => any,
+		// Null leaves the Reset button out.
+		getDefaultSettings: (() => any) | null,
 		getCurrentSettings: () => any,
 		uploadSettings: (settings: any) => Promise<void>,
 	): HTMLDivElement {
@@ -3914,25 +4906,30 @@ class SettingIframe {
 		const actionsContainer = document.createElement('div');
 		actionsContainer.classList.add('xcu-editor-actions');
 
-		const resetButton = this.createButtonWithText(
-			`${prefix}-reset-button`,
-			_('Reset'),
-			_('Reset to default {0}').replace('{0}', settingsName),
-			['button--vue-secondary', `${prefix}-reset-icon`],
-			async (button) => {
-				const confirmed = window.confirm(
-					_('Are you sure you want to reset {0}?').replace('{0}', settingsName),
-				);
-				if (!confirmed) {
-					return;
-				}
-				button.disabled = true;
-				const defaultSettings = getDefaultSettings();
-				await uploadSettings(defaultSettings);
-				button.disabled = false;
-			},
-		);
-		actionsContainer.appendChild(resetButton);
+		if (getDefaultSettings) {
+			const resetButton = this.createButtonWithText(
+				`${prefix}-reset-button`,
+				_('Reset'),
+				_('Reset to default {0}').replace('{0}', settingsName),
+				['button--vue-secondary', `${prefix}-reset-icon`],
+				async (button) => {
+					const confirmed = window.confirm(
+						_('Are you sure you want to reset {0}?').replace(
+							'{0}',
+							settingsName,
+						),
+					);
+					if (!confirmed) {
+						return;
+					}
+					button.disabled = true;
+					const defaultSettings = getDefaultSettings();
+					await uploadSettings(defaultSettings);
+					button.disabled = false;
+				},
+			);
+			actionsContainer.appendChild(resetButton);
+		}
 
 		const saveButton = this.createButtonWithText(
 			`${prefix}-save-button`,
@@ -3961,7 +4958,7 @@ class SettingIframe {
 			signatureCert: '',
 			signatureKey: '',
 			signatureCa: '',
-			aiProviderURL: this.getDefaultAIProviderURL(),
+			aiProviderURL: '',
 			aiProviderAPIKey: '',
 			aiProviderModel: '',
 			aiImageProviderAPIKey: '',
@@ -3998,6 +4995,27 @@ class SettingIframe {
 		);
 	}
 
+	private resetAIProviders(data: ViewSettings, root: HTMLElement): void {
+		const providerSelect = root.querySelector(
+			'#aiProvider',
+		) as HTMLSelectElement | null;
+		if (providerSelect) {
+			providerSelect.value = DEFAULT_PROVIDER;
+			providerSelect.dispatchEvent(new Event('change'));
+		}
+		const sameAsText = root.querySelector(
+			'#aiImageSameAsText-input',
+		) as HTMLInputElement | null;
+		if (sameAsText && !sameAsText.checked) sameAsText.click();
+		data.aiImageModel = '';
+		this.resetAIImageModelSelect('');
+
+		this.showAIEmptyState(root, true);
+		(
+			root.querySelector('#ai-add-provider-button') as HTMLElement | null
+		)?.focus();
+	}
+
 	private getProviderIdFromUrl(url: string): string {
 		const provider = this.getProviderByUrl(url);
 		return provider ? provider.id : 'custom';
@@ -4013,7 +5031,9 @@ class SettingIframe {
 		if (providerSelect?.value) {
 			return providerSelect.value;
 		}
-		return this.getProviderIdFromUrl(data.aiProviderURL);
+		return data.aiProviderURL
+			? this.getProviderIdFromUrl(data.aiProviderURL)
+			: DEFAULT_PROVIDER;
 	}
 
 	private isCustomProviderSelected(
@@ -4108,8 +5128,8 @@ document.addEventListener('DOMContentLoaded', () => {
 	const adminContainer = document.getElementById('allConfigSection');
 	if (adminContainer) {
 		initTranslationStr();
-		(window as any).settingIframe = new SettingIframe();
-		(window as any).settingIframe.init();
+		window.settingIframe = new SettingIframe();
+		window.settingIframe.init();
 		const postHeight = () => {
 			window.parent.postMessage(
 				JSON.stringify({
@@ -4148,4 +5168,4 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 (window as any)._ = _;
-(window as any).onload = onLoaded;
+window.onload = onLoaded;

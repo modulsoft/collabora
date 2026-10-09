@@ -26,6 +26,13 @@
 // (and `_` resolves to the identity on untranslated strings).
 (globalThis as any)._ = (s: string) => s;
 
+// gettext plural shim. In the browser js/plural.js puts _n on the window,
+// which is the global object there. Here the window is a jsdom one instead,
+// so that name never reaches the sources and the shim stands in for it. An
+// untranslated string takes the English rule, which is the rule below.
+(globalThis as any)._n = (singular: string, plural: string, count: number) =>
+	Number(count) === 1 ? singular : plural;
+
 // Leaflet's `L` namespace is a script-loaded global in the browser. Source
 // files run mixin calls (L.Map.include, L.Handler.extend, ...) at module
 // load time, so we need enough of a stub for those to be no-ops. extend()
@@ -134,6 +141,10 @@ globalThis.window = (function () {
 
 globalThis.document = globalThis.window.document;
 
+// jsdom keeps these on its own window, and the bundled sources name them bare.
+(globalThis as any).Element = (globalThis.window as any).Element;
+(globalThis as any).CSS = (globalThis.window as any).CSS;
+
 (globalThis.window as any).prefs = {
 	canPersist: false,
 };
@@ -150,7 +161,11 @@ globalThis.document = globalThis.window.document;
 	},
 	LOUtil: {},
 	Map: {
-		include(input: any) {},
+		// The objects passed to include, in the order they were passed.
+		included: [] as any[],
+		include(input: any) {
+			(globalThis as any).L.Map.included.push(input);
+		},
 		mergeOptions(input: any) {},
 		addInitHook(i1: any, i2: any, i3: any) {},
 	},
@@ -163,7 +178,7 @@ globalThis.document = globalThis.window.document;
 	control: {},
 };
 
-(globalThis.window as any).L = (globalThis as any).L;
+globalThis.window.L = (globalThis as any).L;
 
 // Old-style Leaflet factory inheritance: `window.L.Control.Foo = window.L.Control.extend({...})`
 // creates a subclass whose prototype is the given methods/properties object. The Handler stub
@@ -181,6 +196,34 @@ globalThis.document = globalThis.window.document;
 	Sub.prototype.constructor = Sub;
 	(Sub as any).extend = Parent.extend;
 	return Sub;
+};
+
+// jsdom implements no DOMRect.
+(globalThis as any).DOMRect = class _DOMRect {
+	x = 0;
+	y = 0;
+	width = 0;
+	height = 0;
+
+	constructor(x = 0, y = 0, width = 0, height = 0) {
+		this.x = x;
+		this.y = y;
+		this.width = width;
+		this.height = height;
+	}
+
+	get left() {
+		return this.x;
+	}
+	get top() {
+		return this.y;
+	}
+	get right() {
+		return this.x + this.width;
+	}
+	get bottom() {
+		return this.y + this.height;
+	}
 };
 
 globalThis._ = (input: string) => input;

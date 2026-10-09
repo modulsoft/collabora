@@ -13,8 +13,10 @@ ETAGS=ctags -e
 # number so make does not pile on new jobs while the machine is already busy.
 # On a host shared by several builds each one backs off instead of all running
 # a full set of jobs at once. An explicit -j or -l wins. Without nproc, no
-# change.
-NPROC := $(shell nproc 2>/dev/null)
+# change. Only make 4.4 and later show -j and -l in MAKEFLAGS while parsing,
+# so older makes get no default. 4.4 also added the intcmp function, which
+# expands to y here and to nothing on an older make.
+NPROC := $(and $(intcmp 1,1,,y),$(shell nproc 2>/dev/null))
 MAKEFLAGS := $(MAKEFLAGS) \
 	$(if $(findstring j,$(MAKEFLAGS)),,$(if $(NPROC),-j$(NPROC))) \
 	$(if $(findstring l,$(MAKEFLAGS)),,$(if $(NPROC),-l$(NPROC)))
@@ -32,14 +34,14 @@ autogen_input_goals = $(filter-out %clean %clean-am am--depfiles,$(or $(MAKECMDG
 include $(top_builddir)/autogen-input.mk
 
 $(top_builddir)/autogen-input.mk: $(if $(autogen_input_goals),$(wildcard $(top_builddir)/autogen.input))
-	$(if $<,$(abs_top_srcdir)/autogen.py)
+	$(if $<,$(PYTHON) $(abs_top_srcdir)/autogen.py)
 	@echo '# Marks the autogen.input that the build tree was configured from.' > $@
 
 DISTCLEANFILES = autogen-input.mk
 
 build-samples:
 	$(QUIET_MKDIRP) mkdir -p $(abs_top_builddir)/test/samples
-	$(QUIET_SAMPLES) $(abs_top_srcdir)/scripts/build-samples.py $(abs_top_srcdir)/test/samples $(abs_top_srcdir)/test/samples
+	$(QUIET_SAMPLES) $(PYTHON) $(abs_top_srcdir)/scripts/build-samples.py $(abs_top_srcdir)/test/samples $(abs_top_srcdir)/test/samples
 
 if ENABLE_MOBILEAPP
 
@@ -237,6 +239,7 @@ shared_sources = \
                  net/HttpHelper.cpp \
                  net/HttpRequest.cpp \
                  net/NetUtil.cpp \
+                 net/Socket-server.cpp \
                  net/Socket-unix.cpp \
                  net/Socket.cpp \
                  wsd/Exceptions.cpp
@@ -261,6 +264,7 @@ coolwsd_sources = \
                   wsd/ContentType.cpp \
                   wsd/DeckSpec.cpp \
                   wsd/DocumentBroker.cpp \
+                  wsd/Extensions.cpp \
                   wsd/FileServer.cpp \
                   wsd/FileServerUtil.cpp \
                   wsd/HealthCheck.cpp \
@@ -269,9 +273,9 @@ coolwsd_sources = \
                   wsd/ProxyProtocol.cpp \
                   wsd/ProxyRequestHandler.cpp \
                   wsd/QuarantineUtil.cpp \
-                  wsd/RelatedDocuments.cpp \
                   wsd/RemoteConfig.cpp \
                   wsd/RemoteDocumentBroker.cpp \
+                  wsd/RemoteLinks.cpp \
                   wsd/RequestDetails.cpp \
                   wsd/RequestVettingStation.cpp \
                   wsd/ServerAuditUtil.cpp \
@@ -360,6 +364,7 @@ wsd_headers = \
               wsd/DocumentToolDescriptions.hpp \
               wsd/DocumentBroker.hpp \
               wsd/Exceptions.hpp \
+              wsd/Extensions.hpp \
               wsd/FileServer.hpp \
               wsd/HealthCheck.hpp \
               wsd/HostUtil.hpp \
@@ -372,9 +377,9 @@ wsd_headers = \
               wsd/ProxyProtocol.hpp \
               wsd/ProxyRequestHandler.hpp \
               wsd/QuarantineUtil.hpp \
-              wsd/RelatedDocuments.hpp \
               wsd/RemoteConfig.hpp \
               wsd/RemoteDocumentBroker.hpp \
+              wsd/RemoteLinks.hpp \
               wsd/RequestDetails.hpp \
               wsd/RequestVettingStation.hpp \
               wsd/SenderQueue.hpp \
@@ -431,7 +436,9 @@ shared_headers = \
                  common/RotatingToken.hpp \
                  common/SaveResult.hpp \
                  common/Seccomp.hpp \
+                 common/ServerPrivateInfo.hpp \
                  common/Session.hpp \
+                 common/SettingsSecrets.hpp \
                  common/SettingsStorage.hpp \
                  common/SigHandlerTrap.hpp \
                  common/SigUtil.hpp \
@@ -517,10 +524,10 @@ dist-hook:
 # engine is present here, in the git checkout where make dist runs). genlangmaps
 # runs first because unocommands.py --translate is driven by the generated
 # uno-localizations.json.
-	$(abs_top_srcdir)/scripts/genlangmaps.py $(distdir) $(abs_top_srcdir)/engine
-	$(abs_top_srcdir)/scripts/unocommands.py --update $(distdir) $(abs_top_srcdir)/engine
-	$(abs_top_srcdir)/scripts/unocommands.py --translate $(distdir) $(abs_top_srcdir)/engine/translations
-	$(abs_top_srcdir)/scripts/unoshortcuts.py --update $(distdir) $(abs_top_srcdir)/engine
+	$(PYTHON) $(abs_top_srcdir)/scripts/genlangmaps.py $(distdir) $(abs_top_srcdir)/engine
+	$(PYTHON) $(abs_top_srcdir)/scripts/unocommands.py --update $(distdir) $(abs_top_srcdir)/engine
+	$(PYTHON) $(abs_top_srcdir)/scripts/unocommands.py --translate $(distdir) $(abs_top_srcdir)/engine/translations
+	$(PYTHON) $(abs_top_srcdir)/scripts/unoshortcuts.py --update $(distdir) $(abs_top_srcdir)/engine
 
 EXTRA_DIST = \
              $(server_mans) \
@@ -615,7 +622,7 @@ build-qtapp-gbuild-libs: FORCE
 
 # Similar to build-gbuild, but for the --enable-fuzzers case.
 build-fuzzer-gbuild-libs: FORCE
-	$(MAKE) $(if $(verbose),,-s) -C $(abs_top_srcdir)/gbuild BUILDDIR=$(ENGINE_BUILDDIR) ONLINE.SRCDIR=$(abs_top_srcdir) ONLINE.BUILDDIR=$(abs_top_builddir) ONLINE.CAP_LIBS='$(CAP_LIBS)' ONLINE.SIMD_CFLAGS='$(SIMD_CFLAGS)' ONLINE.FUZZER_CFLAGS='-fsanitize=fuzzer-no-link' StaticLibrary_shared StaticLibrary_wsd
+	$(MAKE) $(if $(verbose),,-s) -C $(abs_top_srcdir)/gbuild BUILDDIR=$(ENGINE_BUILDDIR) ONLINE.SRCDIR=$(abs_top_srcdir) ONLINE.BUILDDIR=$(abs_top_builddir) ONLINE.CAP_LIBS='$(CAP_LIBS)' ONLINE.SIMD_CFLAGS='$(SIMD_CFLAGS)' ONLINE.FUZZER_CFLAGS='-fsanitize=fuzzer-no-link' StaticLibrary_shared StaticLibrary_wsd StaticLibrary_forkit StaticLibrary_dummytraceevent
 
 FORCE:
 
@@ -625,6 +632,8 @@ SYSTEM_STAMP = @SYSTEMPLATE_PATH@/system_stamp
 RUN_GDB = $(if $(GDB_FRONTEND),$(GDB_FRONTEND),gdb --tui --args)
 TEST_APPARMOR=$(shell if test 1 -eq `cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2> /dev/null || echo 0`; then echo "enabled"; fi)
 ENABLE_NAMESPACE = $(if $(TEST_APPARMOR),podman unshare,)
+
+LANDLOCK_ENV = COOL_FORCE_LANDLOCK=1
 
 if ENABLE_FUZZERS
 CLEANUP_DEPS=
@@ -719,7 +728,14 @@ check-apparmour-namespaces:
 		(echo "WARNING: to workaround this, either (a) disable with sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 or (b) install podman" && false); \
 	fi
 
-run: setup-wsd check-apparmour-namespaces
+run: setup-wsd
+	$(LANDLOCK_ENV) ./coolwsd $(COMMON_PARAMS) \
+			--o:logging.file[@enable]=${OUTPUT_TO_FILE} --o:logging.level=trace \
+			--o:logging_ui_cmd.file[@enable]=${OUTPUT_TO_FILE} \
+			--o:trace_event[@enable]=true \
+			$(RUN_EXTRA)
+
+namespace-run: setup-wsd check-apparmour-namespaces $(SYSTEM_STAMP)
 	$(ENABLE_NAMESPACE) ./coolwsd $(COMMON_PARAMS) \
 			--o:logging.file[@enable]=${OUTPUT_TO_FILE} --o:logging.level=trace \
 			--o:logging_ui_cmd.file[@enable]=${OUTPUT_TO_FILE} \
@@ -736,7 +752,7 @@ run-nocaps: setup-wsd
 
 if ENABLE_DEBUG
 run-one: setup-wsd
-	$(ENABLE_NAMESPACE) ./coolwsd $(COMMON_PARAMS) \
+	$(LANDLOCK_ENV) ./coolwsd $(COMMON_PARAMS) \
 			--o:logging.file[@enable]=true --o:logging.level=trace \
 			--o:logging_ui_cmd.file[@enable]=true \
 			--singlekit
@@ -772,7 +788,7 @@ sync-impress:
 	browser-sync start --config browsersync-config.js --startPath "browser/96c23f663/debug.html?file_path=/$(abs_top_srcdir)/test/samples/impress-edit.fodp"
 
 run-trace: setup-wsd
-	$(ENABLE_NAMESPACE) ./coolwsd $(COMMON_PARAMS) \
+	$(LANDLOCK_ENV) ./coolwsd $(COMMON_PARAMS) \
 			--o:logging.file[@enable]=false --o:logging.level=trace \
 			--o:logging_ui_cmd.file[@enable]=false \
 			--o:trace[@enable]=true --o:trace.path=${builddir}/trace.txt.gz \
@@ -780,28 +796,28 @@ run-trace: setup-wsd
 
 run-valgrind: setup-wsd
 	@echo "Launching coolwsd under valgrind (but not forkit/coolkit, yet)"
-	$(ENABLE_NAMESPACE) valgrind --tool=memcheck --trace-children=no -v --read-var-info=yes \
+	$(LANDLOCK_ENV) valgrind --tool=memcheck --trace-children=no -v --read-var-info=yes \
 		./coolwsd $(COMMON_PARAMS) \
 			--o:logging.file[@enable]=false --o:logging.level=trace \
 			--o:logging_ui_cmd.file[@enable]=false
 
 run-gdb: setup-wsd
 	@echo "Launching coolwsd under gdb"
-	$(ENABLE_NAMESPACE) $(RUN_GDB) \
+	$(LANDLOCK_ENV) $(RUN_GDB) \
 		./coolwsd $(COMMON_PARAMS) \
 			--o:logging.file[@enable]=false --o:logging.level=error \
 			--o:logging_ui_cmd.file[@enable]=false
 
 run-callgrind: setup-wsd
 	@echo "Launching coolwsd under valgrind's callgrind"
-	$(ENABLE_NAMESPACE) valgrind --tool=callgrind --simulate-cache=yes --dump-instr=yes --num-callers=50 --error-limit=no --trace-children=yes \
+	$(LANDLOCK_ENV) valgrind --tool=callgrind --simulate-cache=yes --dump-instr=yes --num-callers=50 --error-limit=no --trace-children=yes \
 		./coolwsd $(COMMON_PARAMS) \
 			--o:logging.file[@enable]=false --o:logging.level=error \
 			--o:logging_ui_cmd.file[@enable]=false
 
 run-strace: setup-wsd
 	@echo "Launching coolwsd under strace"
-	$(ENABLE_NAMESPACE) strace -o strace.log -f -tt -s 256 \
+	$(LANDLOCK_ENV) strace -o strace.log -f -tt -s 256 \
 		./coolwsd $(COMMON_PARAMS) \
 			--o:logging.file[@enable]=false --o:logging.level=error \
 			--o:logging_ui_cmd.file[@enable]=false
@@ -813,7 +829,7 @@ run-tcmalloc: setup-wsd
 		exit 1; \
 	fi
 	@echo see https://gperftools.github.io/gperftools/heapprofile.html for Modifying Runtime Behavior via env variables
-	$(ENABLE_NAMESPACE) LD_PRELOAD=libtcmalloc.so.4 ./coolwsd $(COMMON_PARAMS) \
+	$(LANDLOCK_ENV) LD_PRELOAD=libtcmalloc.so.4 ./coolwsd $(COMMON_PARAMS) \
 			--o:logging.file[@enable]=${OUTPUT_TO_FILE} --o:logging.level=trace \
 			--o:logging_ui_cmd.file[@enable]=${OUTPUT_TO_FILE} \
 			--o:trace_event[@enable]=true
@@ -823,6 +839,8 @@ else
 SYSTEM_STAMP =
 
 endif
+
+systemplate: $(SYSTEM_STAMP)
 
 if ENABLE_FUZZERS
 ALL_LOCAL_DEPS=build-fuzzer-gbuild-libs
@@ -835,7 +853,7 @@ endif
 endif
 
 if ENABLE_SERVER
-all-local: $(ALL_LOCAL_DEPS) @JAILS_PATH@ @CACHE_PATH@ $(SYSTEM_STAMP)
+all-local: $(ALL_LOCAL_DEPS) @JAILS_PATH@ @CACHE_PATH@
 	@abs_srcdir='$(abs_top_srcdir)' $(abs_top_srcdir)/scripts/refresh-git-hooks
 else
 all-local: $(ALL_LOCAL_DEPS)
@@ -1109,4 +1127,4 @@ sbom-freshness: collabora-online-sbom.spdx.json
 		$(ENGINE_BUILDDIR)/workdir/CustomTarget/instsetoo_native/sbom/collaboraofficebasis-core-sbom.spdx.json \
 		$(abs_top_builddir)/collabora-online-sbom.spdx.json
 
-.PHONY: cleanup setup-wsd sbom-check sbom-audit sbom-freshness
+.PHONY: cleanup setup-wsd systemplate sbom-check sbom-audit sbom-freshness

@@ -32,7 +32,7 @@ class TopToolbar extends JSDialog.Toolbar {
 
 	onRemove() {
 		if (this.parentContainer) {
-			this.parentContainer.outerHTML = '';
+			this.parentContainer.remove();
 			this.parentContainer = null;
 		}
 
@@ -51,12 +51,14 @@ class TopToolbar extends JSDialog.Toolbar {
 
 		// In case it contains garbage
 		if (this.parentContainer) {
-			this.parentContainer.outerHTML = '';
+			this.parentContainer.remove();
 			this.parentContainer = null;
 		}
 
 		// Use original template as provided by server
-		$('#toolbar-logo').after(this.map.toolbarUpTemplate.cloneNode(true));
+		const toolbarLogo = document.getElementById('toolbar-logo');
+		if (toolbarLogo)
+			toolbarLogo.after(this.map.toolbarUpTemplate.cloneNode(true));
 		this.parentContainer = window.L.DomUtil.get('toolbar-up');
 		window.L.DomUtil.addClass(this.parentContainer, 'ui-toolbar');
 	}
@@ -372,23 +374,26 @@ class TopToolbar extends JSDialog.Toolbar {
 
 		switch (docType) {
 		case 'spreadsheet':
-			if (this.parentContainer) {
-				['reset', 'textalign', 'wraptextbutton', 'breakspacing', 'insertannotation', 'conditionalformatdialog',
-					'numberformatcurrency', 'numberformatpercent',
-					'numberformatincdecimals', 'numberformatdecdecimals', 'break-number', 'togglemergecells', 'breakmergecells',
-					'setborderstyle', 'sortascending', 'sortdescending', 'breaksorting', 'backgroundcolor', 'breaksidebar', 'sidebar', 'printoptions'
-				].forEach((id) => {
-					this.showItem(id, true);
-				});
+			{
+				if (this.parentContainer) {
+					['reset', 'textalign', 'wraptextbutton', 'breakspacing', 'insertannotation', 'conditionalformatdialog',
+						'numberformatcurrency', 'numberformatpercent',
+						'numberformatincdecimals', 'numberformatdecdecimals', 'break-number', 'togglemergecells', 'breakmergecells',
+						'setborderstyle', 'sortascending', 'sortdescending', 'breaksorting', 'backgroundcolor', 'breaksidebar', 'sidebar', 'printoptions'
+					].forEach((id) => {
+						this.showItem(id, true);
+					});
 
-				this.showItem('print', false);
-				this.showItem('styles', false);
-			}
+					this.showItem('print', false);
+					this.showItem('styles', false);
+				}
 
-			$('#toolbar-wrapper').addClass('spreadsheet');
-			if (window.mode.isTablet()) {
-				$(this.map.options.documentContainer).addClass('tablet');
-				$('#toolbar-wrapper').addClass('tablet');
+				const toolbarWrapper = document.getElementById('toolbar-wrapper');
+				if (toolbarWrapper) toolbarWrapper.classList.add('spreadsheet');
+				if (window.mode.isTablet()) {
+					$(this.map.options.documentContainer).addClass('tablet');
+					if (toolbarWrapper) toolbarWrapper.classList.add('tablet');
+				}
 			}
 
 			break;
@@ -460,10 +465,21 @@ class TopToolbar extends JSDialog.Toolbar {
 					el.setAttribute('disabled', 'true');
 			}
 		});
+
+		if (this.map['wopi']) {
+			var hideSave = this.map['wopi'].HideSaveOption || e.detail.perm !== 'edit';
+			this.showItem('save', !hideSave && this.map.uiManager.isButtonVisible('save'));
+			if (window.mode.isDesktop() && hideSave && this.map['wopi'].HidePrintOption) {
+				this.showItem('savebreak', false);
+			} else if (window.mode.isDesktop()) {
+				this.showItem('savebreak', true);
+			}
+		}
 	}
 
 	onWopiProps(e) {
-		if (e.HideSaveOption) {
+		var hideSave = e.HideSaveOption || this.map.isReadOnlyMode();
+		if (hideSave) {
 			this.showItem('save', false);
 		}
 		if (e.HidePrintOption) {
@@ -473,7 +489,7 @@ class TopToolbar extends JSDialog.Toolbar {
 		// On desktop we only have Save and Print buttons before the first
 		// splitter/break. Hide the splitter if we hid both save and print.
 		// TODO: Apply the same logic to mobile/tablet to avoid beginning with a splitter.
-		if (window.mode.isDesktop() && e.HideSaveOption && e.HidePrintOption) {
+		if (window.mode.isDesktop() && hideSave && e.HidePrintOption) {
 			this.showItem('savebreak', false);
 		}
 

@@ -25,10 +25,12 @@
 /// <reference path="./sources.ts" />
 /// <reference path="./helper/canvasContainerSetup.ts" />
 /// <reference path="./helper/matchMediaMock.ts" />
+/// <reference path="./helper/fakeClock.ts" />
 /// <reference path="./helper/rectUtil.ts" />
 /// <reference path="./helper/Events.ts"/>
 /// <reference path="./helper/util.ts"/>
 /// <reference path="./helper/CanvasRecorder.ts"/>
+/// <reference path="./helper/ScratchCanvasStub.ts"/>
 /// <reference path="./helper/Path2DRecorder.ts"/>
 /// <reference path="./helper/ImageRecorder.ts"/>
 /// <reference path="./helper/VectorRenderingReference.ts"/>
@@ -38,6 +40,8 @@
 /// <reference path="./DPIChangeListener.test.ts" />
 /// <reference path="./CanvasSectionContainer.test.ts" />
 /// <reference path="./CBounds.test.ts" />
+/// <reference path="./CleanupSidebar.test.ts" />
+/// <reference path="./SlideAvatars.test.ts" />
 /// <reference path="./CPointSet.test.ts" />
 /// <reference path="./Events.test.ts" />
 /// <reference path="./LOUtil.test.ts" />
@@ -53,9 +57,15 @@
 /// <reference path="./Range2D.test.ts" />
 /// <reference path="./VectorGradientFrame.test.ts" />
 /// <reference path="./VectorGradientPrimitives.test.ts" />
+/// <reference path="./VectorHatchPrimitives.test.ts" />
+/// <reference path="./VectorImageFillPrimitives.test.ts" />
+/// <reference path="./VectorPatternFillPrimitives.test.ts" />
+/// <reference path="./VectorEffectPrimitives.test.ts" />
+/// <reference path="./VectorResourceWalker.test.ts" />
 /// <reference path="./InternUtil.test.ts" />
 /// <reference path="./Plural.test.ts" />
 /// <reference path="./VectorManager.test.ts" />
+/// <reference path="./RenderGeometrySection.test.ts" />
 /// <reference path="./DocDispatcherExtensions.test.ts" />
 /// <reference path="./ContributedNotebookbarTabs.test.ts" />
 /// <reference path="./CDarkOverlay.test.ts" />
@@ -64,4 +74,6 @@
 /// <reference path="./SlideLinks.test.ts" />
 /// <reference path="./SlideLinkToolbar.test.ts" />
 /// <reference path="./ExportFormats.test.ts" />
+/// <reference path="./Tooltip.test.ts" />
+/// <reference path="./CollabNotices.test.ts" />
 // NOTE: reference new tests here ...

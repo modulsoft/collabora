@@ -654,6 +654,7 @@ class Menubar extends window.L.Control {
 				{uno: '.uno:SpellOnline'},
 				{name: _UNO('.uno:LanguageMenu'), type: 'menu', menu: [
 					{name: _('None (Do not check spelling)'), id: 'nonelanguage', uno: '.uno:LanguageStatus?Language:string=Default_LANGUAGE_NONE'}]},
+				{name: _('Clean Up'), unoid: '.uno:PresentationCleanup', id: 'cleanupdeck', type: 'action'},
 				{type: 'separator'},
 				{name: _UNO('.uno:RunMacro'), id: 'runmacro', uno: '.uno:RunMacro'}
 
@@ -1777,13 +1778,56 @@ class Menubar extends window.L.Control {
 		}
 		const target = menu[idx];
 		const exts = (this._map._extensions || {}) as { [id: string]: any };
-		// Only an extension with a sidebar `entry` has anything for this toggle to
-		// open; a commands-only extension reaches the menu solely through
-		// _applyExtensionMenuContributions below.
-		const ids = Object.keys(exts)
-			.filter((id) => exts[id].options.manifest.entry)
-			.sort();
-		if (ids.length === 0) {
+		const entries: MenuItem[] = [];
+		for (const id of Object.keys(exts).sort()) {
+			const manifest = exts[id].options.manifest;
+			const name = manifest.name as string;
+			// Only an extension with a sidebar `entry` has anything for this toggle to
+			// open. An extension that places its commands in a document menu of its own
+			// choosing reaches the menu through _applyExtensionMenuContributions below
+			// instead.
+			if (manifest.entry) {
+				entries.push({
+					name: name,
+					id: 'extension-toggle-' + id,
+					type: 'action',
+				});
+			}
+			const placement = manifest.contributes && manifest.contributes.extensionsMenu;
+			if (!placement || !placement.length) continue;
+			const commands = manifest.contributes.commands || [];
+			const submenu: MenuItem[] = [];
+			for (const item of placement) {
+				if (item.separator) {
+					submenu.push({ type: 'separator' });
+					continue;
+				}
+				const command = commands.find(
+					(c: { id: string; title: string }) => c.id === item.command,
+				);
+				if (!command) {
+					console.warn(
+						'extension ' +
+							id +
+							': contributes.extensionsMenu names unknown command "' +
+							item.command +
+							'"',
+					);
+					continue;
+				}
+				submenu.push({
+					name: command.title,
+					id: 'ext:' + id + ':' + item.command,
+					type: 'action',
+				});
+			}
+			if (submenu.length) {
+				// The extension's own name is the submenu, so several extensions' commands
+				// stay told apart under one Extensions menu.
+				entries.push({ name: name, id: 'ext-menu-' + id, type: 'menu', menu: submenu });
+			}
+		}
+		if (entries.length === 0) {
 			// Hide the whole Extensions submenu when nothing is installed.
 			// Use the `hidden` flag rather than splicing the entry out, so a
 			// later refresh (once discovery populates app.map._extensions) can
@@ -1793,11 +1837,7 @@ class Menubar extends window.L.Control {
 			return;
 		}
 		target.hidden = false;
-		target.menu = ids.map((id) => ({
-			name: app.LOUtil.escapeHtml(exts[id].options.manifest.name as string),
-			id: 'extension-toggle-' + id,
-			type: 'action',
-		}));
+		target.menu = entries;
 	}
 
 	// Splices each loaded extension's contributes.menus entries into the matching
@@ -1852,11 +1892,7 @@ class Menubar extends window.L.Control {
 						continue;
 					}
 					target.menu.push({
-						// A manifest's command title is extension-author content, not
-						// engine-translated UI text, so it needs the same HTML-escaping
-						// any other externally-supplied text would need before landing in
-						// a menu label:
-						name: app.LOUtil.escapeHtml(command.title),
+						name: command.title,
 						id: 'ext:' + extId + ':' + commandId,
 						type: 'action',
 					});
@@ -2053,9 +2089,6 @@ class Menubar extends window.L.Control {
 						$nav.css({height:'', bottom: ''});
 					} else {
 						window.mobileMenuWizard = false;
-						// FIXME: unify all code paths by single call when legacy refresh is removed
-						if ((window as any).mobileWizard === true)
-							this._map.sendUnoCommand('.uno:SidebarHide');
 						this._map.fire('closemobilewizard');
 						$('#toolbar-hamburger').removeClass('menuwizard-opened').addClass('menuwizard-closed');
 						$('#toolbar-mobile-back').css('visibility', '');
@@ -2322,10 +2355,10 @@ class Menubar extends window.L.Control {
 						itemState = app.map.uiManager.getHighlightMode();
 						if (itemState) $(aItem).addClass(constChecked);
 						else $(aItem).removeClass(constChecked);
-					} else if (id === 'transitiondeck') {
+					} else if (id === 'transitiondeck' || id === 'cleanupdeck') {
 						// notebookbar-based panel, highlighted from the command
 						// state set in Sidebar.updatePresentationDeckHighlight
-						itemState = this._map['stateChangeHandler'].getItemValue('transitiondeck');
+						itemState = this._map['stateChangeHandler'].getItemValue(id);
 						if (itemState === 'true') $(aItem).addClass(constChecked);
 						else $(aItem).removeClass(constChecked);
 					} else if (id === 'presentation-in-console') {
@@ -2604,6 +2637,7 @@ class Menubar extends window.L.Control {
 			|| id === 'serveraudit'
 			|| id === 'animationdeck'
 			|| id === 'transitiondeck'
+			|| id === 'cleanupdeck'
 			|| id.startsWith('extension-toggle-')
 			|| id.startsWith('ext:')
 			|| id === 'importslides'
@@ -2727,8 +2761,7 @@ class Menubar extends window.L.Control {
 		} else if (id === 'inserttextbox') {
 			this._map.sendUnoCommand('.uno:Text?CreateDirectly:bool=true');
 		} else if (id === 'pagesetup') {
-			this._map.sendUnoCommand('.uno:SidebarShow');
-			this._map.sendUnoCommand('.uno:LOKSidebarWriterPage');
+			this._map.sendUnoCommand('.uno:KitSidebarWriterPage');
 			this._map.fire('showwizardsidebar');
 			window.pageMobileWizard = true;
 		} else if (id === 'showslide') {
@@ -2822,9 +2855,8 @@ class Menubar extends window.L.Control {
 	 */
 	private _createFileIcon(): void {
 		if (!(window.logoURL && window.logoURL == "none")) {
-			var liItem = window.L.DomUtil.create('li', '');
+			var liItem = window.L.DomUtil.create('div', '');
 			liItem.id = 'document-header';
-			liItem.setAttribute('role', 'menuitem');
 			var aItem = window.L.DomUtil.create('a', 'document-logo', liItem);
 			$(aItem).data('id', 'document-logo');
 			$(aItem).data('type', 'action');
@@ -2840,9 +2872,16 @@ class Menubar extends window.L.Control {
 				aItem.setAttribute('data-cooltip', iconTooltip);
 			}
 			app.LOUtil.syncDocumentLogoAriaLabel(aItem);
+			window.L.control.attachTooltipEventListener(aItem, this._map);
 
-			if (this._menubarCont != null)
-				this._menubarCont.insertBefore(liItem, this._menubarCont.firstChild);
+			const mainNav = document.querySelector('.main-nav');
+			if (mainNav) {
+				const existingHeader = document.getElementById('document-header');
+				if (existingHeader) {
+					existingHeader.remove();
+				}
+				mainNav.insertBefore(liItem, mainNav.firstChild);
+			}
 
 			/**!
 			 * Only the desktop applications have a backstage view.
@@ -3020,18 +3059,20 @@ class Menubar extends window.L.Control {
 			var aItem = window.L.DomUtil.create('a', menu[i].disabled ? 'disabled' : '', liItem);
 			aItem.setAttribute('role', 'menuitem');
 			if (menu[i].name !== undefined) {
-				aItem.innerHTML = menu[i].name;
+				aItem.textContent = menu[i].name;
 			} else if (menu[i].uno !== undefined) {
-				aItem.innerHTML = _UNO(menu[i].uno, docType);
+				aItem.textContent = _UNO(menu[i].uno, docType);
 			} else {
 				$(aItem).addClass('disabled');
 				aItem.replaceChildren();
 			}
 			if (menu[i].uno && (JSDialog.ShortcutsUtil.hasShortcut(menu[i].uno) || JSDialog.ShortcutsUtil.hasShortcut(menu[i].id))) {
+				// eslint-disable-next-line no-restricted-syntax -- the label is markup with a shortcut span
 				aItem.innerHTML = JSDialog.ShortcutsUtil.getMenuLabel(aItem.innerHTML, menu[i].uno ? menu[i].uno : menu[i].id);
 			} else if (menu[i].shortcut && JSDialog.ShortcutsUtil.hasShortcut(menu[i].shortcut)) {
 				// Action-only entries have no UNO command to derive a shortcut
 				// from, so they name the command that owns it explicitly.
+				// eslint-disable-next-line no-restricted-syntax -- the label is markup with a shortcut span
 				aItem.innerHTML = JSDialog.ShortcutsUtil.getMenuLabel(aItem.innerHTML, menu[i].shortcut);
 			}
 

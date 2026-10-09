@@ -60,6 +60,7 @@ $(eval $(call gb_StaticLibrary_add_generated_exception_objects,wsd, \
     wsd/ContentType \
     wsd/DeckSpec \
     wsd/DocumentBroker \
+    wsd/Extensions \
     wsd/FileServer \
     wsd/FileServerUtil \
     wsd/HealthCheck \
@@ -68,9 +69,9 @@ $(eval $(call gb_StaticLibrary_add_generated_exception_objects,wsd, \
     wsd/ProxyProtocol \
     wsd/ProxyRequestHandler \
     wsd/QuarantineUtil \
-    wsd/RelatedDocuments \
     wsd/RemoteConfig \
     wsd/RemoteDocumentBroker \
+    wsd/RemoteLinks \
     wsd/RequestDetails \
     wsd/RequestVettingStation \
     wsd/ServerAuditUtil \

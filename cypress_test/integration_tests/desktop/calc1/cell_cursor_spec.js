@@ -195,13 +195,16 @@ describe(['tagdesktop', 'tagnextcloud', 'tagproxy'], 'Test Cell Selections', fun
 	it('Check non-range cell selection with CTRL', function() {
 		calcHelper.clickOnACell(1, 1, 2, 3);
 
-		cy.wait(500);
+		helper.waitForTimers(this.win, 'clicktimer');
+		helper.processToIdle(this.win);
 		calcHelper.clickOnACell(2, 3, 4, 3, { ctrlKey: true });
 
-		cy.wait(500);
+		helper.waitForTimers(this.win, 'clicktimer');
+		helper.processToIdle(this.win);
 		calcHelper.clickOnACell(4, 3, 2, 6, { ctrlKey: true });
 
-		cy.wait(500);
+		helper.waitForTimers(this.win, 'clicktimer');
+		helper.processToIdle(this.win);
 		calcHelper.clickOnACell(2, 6, 2, 10, { shiftKey: true });
 
 		helper.processToIdle(this.win);
@@ -213,6 +216,10 @@ describe(['tagdesktop', 'tagnextcloud', 'tagproxy'], 'Test Cell Selections', fun
 
 	it('Should not scroll after a right click', function() {
 		helper.typeIntoInputField(helper.addressInputSelector, 'Z1000');
+
+		// Right-clicking before the jump is processed moves the cell cursor back
+		// to where the view was, and the context menu closes.
+		helper.processToIdle(this.win);
 
 		cy.cGet('#document-container').rightclick();
 		const pasteEntry = helper.getContextMenuItem('Paste');
@@ -236,7 +243,7 @@ describe(['tagdesktop', 'tagnextcloud', 'tagproxy'], 'Test Cell Selections', fun
 			cy.cGet('#document-container').realMouseMove(left + 150, topY + 150);
 		});
 
-		cy.wait(1000);
+		helper.processToIdle(this.win);
 
 		helper.waitForCanvasAnimation(this.win);
 

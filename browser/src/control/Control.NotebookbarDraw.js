@@ -18,7 +18,7 @@ window.L.Control.NotebookbarDraw = window.L.Control.NotebookbarImpress.extend({
 
 	getShortcutsBarData: function() {
 		return [
-			!this.map['wopi'].HideSaveOption ?
+			!this.map['wopi'].HideSaveOption && !this.map.isReadOnlyMode() ?
 				{
 					'id': 'shortcutstoolbox',
 					'type': 'toolbox',
@@ -101,7 +101,7 @@ window.L.Control.NotebookbarDraw = window.L.Control.NotebookbarImpress.extend({
 				'text': _('Table'),
 				'name': 'Table',
 				'context': 'Table',
-				'accessibility': { focusBack: true, combination: 'T', de: null }
+				'accessibility': { focusBack: true, combination: 'TB', de: null }
 			},
 			{
 				'id': 'Shape-tab-label',
@@ -180,7 +180,7 @@ window.L.Control.NotebookbarDraw = window.L.Control.NotebookbarImpress.extend({
 
 	getFileTab: function() {
 		var content = [];
-		var hasSave = !this.map['wopi'].HideSaveOption;
+		var hasSave = !this.map['wopi'].HideSaveOption && !this.map.isReadOnlyMode();
 		var hasSaveAs = !this.map['wopi'].UserCanNotWriteRelative;
 		var hasShare = this.map['wopi'].EnableShare;
 		var hasRevisionHistory = window.L.Params.revHistoryEnabled;
@@ -595,6 +595,7 @@ window.L.Control.NotebookbarDraw = window.L.Control.NotebookbarImpress.extend({
 				'id':'invertbackground',
 				'class': 'unoinvertbackground',
 				'type': 'bigcustomtoolitem',
+				'visible': window.prefs.getBoolean('darkTheme'),
 				'text': _('Invert Background'),
 				'accessibility': { focusBack: true, combination: 'BG', de: null }
 			},

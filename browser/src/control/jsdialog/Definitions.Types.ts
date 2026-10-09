@@ -39,6 +39,7 @@ interface WidgetJSON {
 	aria?: AriaLabelAttributes; // ARIA Label attributes
 	ariaLive?: 'polite' | 'assertive' | 'off';
 	gridKeyboardNavigation?: boolean; // receives keyboard navigation for elements in col/rows
+	cssClass?: string; // extra class(es) on the widget root, next to the builder's own
 }
 
 // A widget that can carry a list of entries, such as a combo box or the styles icon view
@@ -59,6 +60,21 @@ interface JSBuilderOptions {
 	suffix: string; // add a suffix to the element ID to make it unique among different builder instances.
 }
 
+// The component a builder belongs to: a dialog, the notebookbar or the mobile wizard.
+interface JSBuilderParent {
+	goLevelDown: (contentToShow: Element) => void;
+	setTabs: (tabs: Element, builder: JSBuilder) => void;
+	rememberOpenTab: (
+		dialogId: WindowId | number,
+		tabControlId: string,
+		index: number,
+	) => void;
+	takeOpenTab: (
+		dialogId: WindowId | number,
+		tabControlId: string,
+	) => number | undefined;
+}
+
 interface JSBuilder {
 	_currentDepth: number; // mobile-wizard only FIXME: encapsulate
 	_responses: any;
@@ -70,7 +86,7 @@ interface JSBuilder {
 	options: JSBuilderOptions; // current state
 	map: MapInterface; // reference to map
 	rendersCache: any; // on demand content cache
-	wizard: any;
+	wizard: JSBuilderParent;
 	windowId?: WindowId | number;
 
 	build: (
@@ -79,6 +95,13 @@ interface JSBuilder {
 		hasVerticalParent: boolean,
 	) => boolean;
 	updateWidget: (parentContainer: Element, updateJSON: WidgetJSON) => void;
+	_createTabClick: (
+		builder: JSBuilder,
+		tabIndex: number,
+		tabs: HTMLButtonElement[],
+		contentDivs: HTMLElement[],
+		tabIds: string[],
+	) => () => void;
 	// parentContainer may be an element, or a function returning one (or
 	// undefined) for a caller whose container can be replaced before this
 	// runs - it is applied on a deferred layouting task, not immediately.
@@ -246,6 +269,7 @@ type NotebookbarTabEntry = {
 	text: string; // visible in the UI
 	name: string; // identifier for tab widget
 	context: string; // list of contexts (separated by '|') in which the element/tab is visible
+	keepSelected?: boolean; // a context change does not switch away from it
 	accessibility: NotebookbarAccessibilityDescriptor;
 };
 
@@ -372,17 +396,50 @@ interface ToolItemWidgetJSON extends WidgetJSON {
 
 interface DeckWidgetJSON extends WidgetJSON {
 	headerText?: string; // title shown in a heading row above the deck's panels
+	name?: string; // legacy deck id
 }
 
 interface PanelWidgetJSON extends WidgetJSON {
 	hidden: boolean; // is hidden
+	expanded?: boolean; // true when the section starts open
 	command: string; // command to trigger options for a panel
 	text: string; // panel title
 	name?: string; // legacy panel id
 	closeCommand?: string; // UNO command that leaves the panel's deck
 }
 
-type ExpanderWidgetJSON = any;
+// type: 'expander' - a section that folds shut under the text of its first child
+interface ExpanderWidgetJSON extends WidgetJSON {
+	expanded?: boolean; // true when the section starts open
+	hidden?: boolean;
+	command?: string; // command to trigger options for the section
+	// A second thing the heading says about what it holds, beside the name
+	secondaryText?: string;
+}
+
+// type: 'progressbar'
+interface ProgressBarWidgetJSON extends WidgetJSON {
+	value?: number; // steps done
+	maxValue?: number; // steps in the whole, 100 when not given
+	infinite?: boolean; // the whole is not known, so the bar moves on its own
+}
+
+// type: 'spinfield'
+interface SpinFieldWidgetJSON extends WidgetJSON {
+	value?: number;
+	min?: number;
+	max?: number;
+	step?: number;
+	unit?: string;
+}
+
+// type: 'slider'
+interface SliderWidgetJSON extends WidgetJSON {
+	value?: number;
+	min?: number;
+	max?: number;
+	step?: number;
+}
 
 // type: 'fixedtext'
 interface TextWidget extends WidgetJSON {
@@ -422,6 +479,8 @@ interface MenuButtonWidgetJSON extends WidgetJSON {
 	icon?: string; // theme-aware icon file name, e.g. 'lc_recsearch.svg'
 	accessKey?: string;
 	noLabel?: boolean; // suppress text label, show icon only
+	// which end of the button the content sits at: 'left' or 'right', absent for the middle
+	xalign?: string;
 }
 
 // type: 'image'
@@ -672,7 +731,7 @@ interface EditEngineSelection {
 interface EditEngineWidgetJSON {
 	paragraphs: EditEngineParagraph[];
 	selection: EditEngineSelection;
-	backgroundColor?: string; // #rrggbb
 	readOnly?: boolean;
+	lockedBy?: number; // view id of another view that edits the same text, so this one only shows it
 	extra?: any; // whatever the concrete engine-side widget adds
 }

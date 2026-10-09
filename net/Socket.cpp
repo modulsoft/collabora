@@ -69,11 +69,6 @@
 #endif
 
 #include <Poco/MemoryStream.h>
-#if !MOBILEAPP
-#include <Poco/Net/HTTPRequest.h>
-#include <Poco/Net/HTTPResponse.h>
-#include <Poco/Net/NetException.h>
-#endif
 // The windows app build cannot compile Poco's net headers.
 #ifndef _WIN32
 #include <Poco/Net/WebSocket.h> // computeAccept
@@ -90,16 +85,6 @@ constexpr std::chrono::microseconds SocketPoll::DefaultPollTimeoutMicroS;
 constexpr std::chrono::microseconds WebSocketHandler::InitialPingDelayMicroS;
 
 std::unique_ptr<Watchdog> SocketPoll::PollWatchdog;
-
-#if !MOBILEAPP
-
-#ifndef __APPLE__
-#define SOCKET_ABSTRACT_UNIX_NAME "coolwsd-"
-#else
-#define SOCKET_ABSTRACT_UNIX_NAME "/tmp/coolwsd-"
-#endif
-
-#endif
 
 std::atomic<size_t> StreamSocket::ExternalConnectionCount = 0;
 
@@ -127,23 +112,12 @@ constexpr std::string_view Socket::toString(Type t)
     return "Unknown";
 }
 
-int Socket::createSocket([[maybe_unused]] Socket::Type type)
+int Socket::createSocket(Socket::Type type)
 {
-#if !MOBILEAPP
-    int domain = AF_UNSPEC;
-    switch (type)
-    {
-    case Type::IPv4: domain = AF_INET;  break;
-    case Type::IPv6: domain = AF_INET6; break;
-    case Type::All:  domain = AF_INET6; break;
-    case Type::Unix: domain = AF_UNIX;  break;
-    default: assert(!"Unknown Socket::Type"); break;
-    }
+    if (!Util::isMobileApp())
+        return net::openStreamSocket(type);
 
-    return Syscall::socket_cloexec_nonblock(domain, SOCK_STREAM /*| SOCK_NONBLOCK | SOCK_CLOEXEC*/, 0);
-#else
     return fakeSocketSocket();
-#endif
 }
 
 std::ostream& Socket::streamStats(std::ostream& os,
@@ -196,29 +170,6 @@ std::string Socket::toStringImpl() const
     return oss.str();
 }
 
-#if !MOBILEAPP
-
-bool StreamSocket::socketpair(const std::chrono::steady_clock::time_point creationTime,
-                              std::shared_ptr<StreamSocket>& parent,
-                              std::shared_ptr<StreamSocket>& child)
-{
-    int pair[2];
-    int rc = Syscall::socketpair_cloexec_nonblock(AF_UNIX, SOCK_STREAM /*| SOCK_NONBLOCK | SOCK_CLOEXEC*/, 0, pair);
-    if (rc != 0)
-        return false;
-    child = std::make_shared<StreamSocket>("save-child", pair[0], Socket::Type::Unix, true, HostType::Other, ReadType::NormalRead, creationTime);
-    child->setNoShutdown();
-    child->setClientAddress("save-child");
-    child->resetThreadOwner(); // The parent will set the owner when it inserts into its poller.
-    parent = std::make_shared<StreamSocket>("save-kit-parent", pair[1], Socket::Type::Unix, true, HostType::Other, ReadType::NormalRead, creationTime);
-    parent->setNoShutdown();
-    parent->setClientAddress("save-parent");
-    parent->resetThreadOwner(); // The child will set the owner when it inserts into its poller.
-
-    return true;
-}
-
-#endif
 
 #if ENABLE_DEBUG
 static std::atomic<long> socketErrorCount;
@@ -401,13 +352,16 @@ void SocketPoll::removeFromWakeupArray()
             getWakeupsArray().erase(it);
     }
 
-#if !MOBILEAPP
-    ::close(_wakeup[0]);
-    ::close(_wakeup[1]);
-#else
-    fakeSocketClose(_wakeup[0]);
-    fakeSocketClose(_wakeup[1]);
-#endif
+    if (!Util::isMobileApp())
+    {
+        net::closeDescriptor(_wakeup[0]);
+        net::closeDescriptor(_wakeup[1]);
+    }
+    else
+    {
+        fakeSocketClose(_wakeup[0]);
+        fakeSocketClose(_wakeup[1]);
+    }
 
     _wakeup[0] = -1;
     _wakeup[1] = -1;
@@ -538,24 +492,14 @@ int SocketPoll::poll(int64_t timeoutMaxMicroS, bool justPoll)
     int rc;
     do
     {
-#if !MOBILEAPP
-#  if HAVE_PPOLL
-        LOGA_TRC(Socket, "ppoll start, timeoutMicroS: " << timeoutMaxMicroS << " size " << size);
-        timeoutMaxMicroS = std::max(timeoutMaxMicroS, int64_t(0));
-        struct timespec timeout;
-        timeout.tv_sec = timeoutMaxMicroS / (1000 * 1000);
-        timeout.tv_nsec = (timeoutMaxMicroS % (1000 * 1000)) * 1000;
-        rc = ::ppoll(_pollFds.data(), size + 1, &timeout, nullptr);
-#  else
-        int timeoutMaxMs = (timeoutMaxMicroS + 999) / 1000;
-        LOG_TRC("Legacy Poll start, timeoutMs: " << timeoutMaxMs);
-        rc = ::poll(_pollFds.data(), size + 1, std::max(timeoutMaxMs,0));
-#  endif
-#else
-        LOG_TRC("SocketPoll Poll");
-        int timeoutMaxMs = (timeoutMaxMicroS + 999) / 1000;
-        rc = fakeSocketPoll(_pollFds.data(), size + 1, std::max(timeoutMaxMs,0));
-#endif
+        LOGA_TRC(Socket, "poll start, timeoutMicroS: " << timeoutMaxMicroS << " size " << size);
+        if (!Util::isMobileApp())
+            rc = net::pollDescriptors(_pollFds.data(), size + 1, timeoutMaxMicroS);
+        else
+        {
+            const int timeoutMaxMs = (timeoutMaxMicroS + 999) / 1000;
+            rc = fakeSocketPoll(_pollFds.data(), size + 1, std::max(timeoutMaxMs, 0));
+        }
     }
     while (rc < 0 && errno == EINTR);
     LOGA_TRC(Socket, "Poll completed with " << rc << " live polls max (" <<
@@ -596,11 +540,10 @@ int SocketPoll::poll(int64_t timeoutMaxMicroS, bool justPoll)
 
         // Clear the data.
         int dump[32];
-#if !MOBILEAPP
-        dump[0] = ::read(_wakeup[0], &dump, sizeof(dump));
-#else
-        dump[0] = fakeSocketRead(_wakeup[0], &dump, sizeof(dump));
-#endif
+        if (!Util::isMobileApp())
+            dump[0] = net::readDescriptor(_wakeup[0], &dump, sizeof(dump));
+        else
+            dump[0] = fakeSocketRead(_wakeup[0], &dump, sizeof(dump));
         LOGA_TRC(Socket, "Wakeup pipe (" << _wakeup[0] << ") read " << dump[0] << " bytes");
 
         std::vector<CallbackFn> invoke;
@@ -884,13 +827,7 @@ void SocketPoll::createWakeups()
     assert(_wakeup[0] == -1 && _wakeup[1] == -1);
 
     // Create the wakeup fd.
-    if (
-#if !MOBILEAPP
-        Syscall::pipe2(_wakeup, O_CLOEXEC | O_NONBLOCK) == -1
-#else
-        fakeSocketPipe2(_wakeup) == -1
-#endif
-        )
+    if ((!Util::isMobileApp() ? net::createPipe(_wakeup) : fakeSocketPipe2(_wakeup)) == -1)
     {
         throw std::runtime_error("Failed to allocate pipe for SocketPoll [" + _name + "] waking.");
     }
@@ -931,110 +868,6 @@ void SocketPoll::removeSockets()
     }
 }
 
-#if !MOBILEAPP
-
-bool SocketPoll::insertNewWebSocketSync(const Poco::URI& uri,
-                                        const std::shared_ptr<WebSocketHandler>& websocketHandler)
-{
-    LOG_TRC("Connecting WS to " << uri.getHost());
-
-    const bool isSSL = uri.getScheme() != "ws";
-#if !ENABLE_SSL
-    if (isSSL)
-    {
-        LOG_ERR("Error: wss for client websocket requested but SSL not compiled in.");
-        return false;
-    }
-#endif
-
-    http::Request req(uri.getPathAndQuery());
-    req.set("User-Foo", "Adminbits");
-    //FIXME: Why do we need the following here?
-    req.set("Accept-Language", "en");
-    req.set("Cache-Control", "no-cache");
-    req.set("Pragma", "no-cache");
-
-    const std::string port = std::to_string(uri.getPort());
-    if (websocketHandler->wsRequest(req, uri.getHost(), port, isSSL, *this))
-    {
-        LOG_DBG("Connected WS to " << uri.getHost());
-        return true;
-    }
-
-    LOG_ERR("Failed to connected WS to " << uri.getHost());
-    return false;
-}
-
-bool SocketPoll::insertNewUnixSocket(
-    const UnxSocketPath &location,
-    const std::string &pathAndQuery,
-    const std::shared_ptr<WebSocketHandler>& websocketHandler,
-    const std::vector<int>* shareFDs)
-{
-    LOG_DBG("Connecting to local UDS " << location);
-    const int fd = Syscall::socket_cloexec_nonblock(AF_UNIX, SOCK_STREAM /*| SOCK_NONBLOCK | SOCK_CLOEXEC*/, 0);
-    if (fd < 0)
-    {
-        LOG_SYS("Failed to connect to unix socket at " << location);
-        return false;
-    }
-
-    struct sockaddr_un addrunix;
-    std::memset(&addrunix, 0, sizeof(addrunix));
-    addrunix.sun_family = AF_UNIX;
-    location.fillInto(addrunix);
-
-    const int res = connect(fd, reinterpret_cast<const struct sockaddr*>(&addrunix), sizeof(addrunix));
-    if (res < 0 && errno != EINPROGRESS)
-    {
-        LOG_SYS("Failed to connect to unix socket at " << location);
-        ::close(fd);
-        return false;
-    }
-
-    std::shared_ptr<StreamSocket> socket
-        = StreamSocket::create<StreamSocket>(std::string(), fd, Socket::Type::Unix,
-                                             true, HostType::Other, websocketHandler);
-    if (!socket)
-    {
-        LOG_ERR("Failed to create socket unix socket at " << location);
-        return false;
-    }
-
-    LOG_DBG("Connected to local UDS " << location << " #" << socket->getFD());
-
-    http::Request req(pathAndQuery);
-    req.set("User-Foo", "Adminbits");
-    req.set("Sec-WebSocket-Key", websocketHandler->getWebSocketKey());
-    req.set("Sec-WebSocket-Version", "13");
-    //FIXME: Why do we need the following here?
-    req.set("Accept-Language", "en");
-    req.set("Cache-Control", "no-cache");
-    req.set("Pragma", "no-cache");
-
-    LOG_TRC("Requesting upgrade of websocket at path " << pathAndQuery << " #" << socket->getFD());
-    if (!shareFDs || shareFDs->empty())
-    {
-        socket->send(req);
-    }
-    else
-    {
-        Buffer buf;
-        req.writeData(buf, INT_MAX); // Write the whole request.
-        socket->sendFDs(buf.getBlock(), buf.getBlockSize(), *shareFDs);
-    }
-
-    std::static_pointer_cast<ProtocolHandlerInterface>(websocketHandler)->onConnect(socket);
-    insertNewSocket(socket);
-
-    // We send lots of data back via this local UDS'
-    socket->setSocketBufferSize(Socket::MaximumSendBufferSize);
-
-    return true;
-}
-
-#else
-
 bool SocketPoll::insertNewFakeSocket(
     int peerSocket,
     const std::shared_ptr<ProtocolHandlerInterface>& websocketHandler)
@@ -1067,7 +900,6 @@ bool SocketPoll::insertNewFakeSocket(
     }
     return false;
 }
-#endif
 
 void ServerSocket::dumpState(std::ostream& os)
 {
@@ -1132,9 +964,7 @@ bool SocketDisposition::execute()
 void WebSocketHandler::dumpState(std::ostream& os, const std::string& indent) const
 {
     os << (_shuttingDown ? "shutd " : "alive ");
-#if !MOBILEAPP
     os << std::setw(5) << _pingTimeUs/1000. << "ms ";
-#endif
     if (_wsPayload.size() > 0)
         HexUtil::dumpHex(os, _wsPayload, "\t\tws queued payload:\n", "\t\t");
     os << '\n';
@@ -1233,169 +1063,63 @@ void SocketPoll::dumpState(std::ostream& os) const
 }
 
 /// Returns true on success only.
-bool ServerSocket::bind([[maybe_unused]] Type type, [[maybe_unused]] int port)
+bool ServerSocket::bind(Type type, int port)
 {
-#if !MOBILEAPP
-    // Enable address reuse to avoid stalling after
-    // recycling, when previous socket is TIME_WAIT.
-    //TODO: Might be worth refactoring out.
-    const int reuseAddress = 1;
-    constexpr unsigned int len = sizeof(reuseAddress);
-    if (::setsockopt(getFD(), SOL_SOCKET, SO_REUSEADDR, &reuseAddress, len) == -1)
-        LOG_SYS("Failed setsockopt SO_REUSEADDR on socket fd " << getFD() << ": " << strerror(errno));
+    if (!Util::isMobileApp())
+        return net::bindToPort(getFD(), Socket::type(), type == Type::Public, port);
 
-    int rc;
-
-    assert (_type != Socket::Type::Unix);
-    if (_type == Socket::Type::IPv4)
-    {
-        struct sockaddr_in addrv4;
-        std::memset(&addrv4, 0, sizeof(addrv4));
-        addrv4.sin_family = AF_INET;
-        addrv4.sin_port = htons(port);
-        if (type == Type::Public)
-            addrv4.sin_addr.s_addr = htonl(INADDR_ANY);
-        else
-            addrv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-
-        rc = ::bind(getFD(), reinterpret_cast<const sockaddr *>(&addrv4), sizeof(addrv4));
-    }
-    else
-    {
-        struct sockaddr_in6 addrv6;
-        std::memset(&addrv6, 0, sizeof(addrv6));
-        addrv6.sin6_family = AF_INET6;
-        addrv6.sin6_port = htons(port);
-        if (type == Type::Public)
-            addrv6.sin6_addr = in6addr_any;
-        else
-            addrv6.sin6_addr = in6addr_loopback;
-
-        const int ipv6only = (_type == Socket::Type::All ? 0 : 1);
-        if (::setsockopt(getFD(), IPPROTO_IPV6, IPV6_V6ONLY, &ipv6only, sizeof(ipv6only)) == -1)
-            LOG_SYS("Failed set ipv6 socket to " << ipv6only);
-
-        rc = ::bind(getFD(), reinterpret_cast<const sockaddr *>(&addrv6), sizeof(addrv6));
-    }
-
-    if (rc)
-        LOG_SYS("Failed to bind to: " << (_type == Socket::Type::IPv4 ? "IPv4" : "IPv6")
-                                      << " port: " << port);
-    else
-        LOG_TRC("Bind to: " << (_type == Socket::Type::IPv4 ? "IPv4" : "IPv6")
-                            << " port: " << port);
-
-    return rc == 0;
-#else
     return true;
-#endif
 }
 
-#if !MOBILEAPP
-
-bool ServerSocket::isUnrecoverableAcceptError(const int cause) const
-{
-    static constexpr const char * messagePrefix = "Failed to accept. (errno: ";
-    switch(cause)
-    {
-        case EINTR:
-        case EAGAIN:        // == EWOULDBLOCK
-        case ENETDOWN:
-        case EPROTO:
-        case ENOPROTOOPT:
-        case EHOSTDOWN:
-#ifdef ENONET
-        case ENONET:
-#endif
-        case EHOSTUNREACH:
-        case EOPNOTSUPP:
-        case ENETUNREACH:
-        case ECONNABORTED:
-        case ETIMEDOUT:
-        case EMFILE:
-        case ENFILE:
-        case ENOMEM:
-        case ENOBUFS:
-        {
-            LOG_DBG(messagePrefix << Util::symbolicErrno(cause) << ", " << std::strerror(cause)
-                                  << ')');
-            return false;
-        }
-        default:
-        {
-            LOG_FTL(messagePrefix << Util::symbolicErrno(cause) << ", " << std::strerror(cause)
-                                  << ')');
-            return true;
-        }
-    }
-}
-
-#endif
 
 std::shared_ptr<Socket> ServerSocket::accept()
 {
     // Accept a connection (if any) and set it to non-blocking.
     // There still need the client's address to filter request from POST(call from REST) here.
-#if !MOBILEAPP
-    assert(_type != Socket::Type::Unix);
-
     UnitWSD* const unitWsd = UnitWSD::isUnitTesting() ? &UnitWSD::get() : nullptr;
-    if (UNITWSD_CALL_INSTANCE(unitWsd, simulateExternalAcceptError()))
-        return nullptr; // Recoverable error, ignore to retry
 
-    struct sockaddr_in6 clientInfo;
-    socklen_t addrlen = sizeof(clientInfo);
-    const int rc = Syscall::accept_cloexec_nonblock(getFD(), reinterpret_cast<struct sockaddr *>(&clientInfo), &addrlen);
-    if (rc < 0)
+    net::PeerAddress peer;
+    int rc;
+    if (!Util::isMobileApp())
     {
-        if (isUnrecoverableAcceptError(errno))
-            Util::forcedExit(EX_SOFTWARE);
-        return nullptr;
-    }
-#else
-    const int rc = fakeSocketAccept4(getFD());
-#endif
-    LOG_TRC("Accepted socket #" << rc << ", creating socket object.");
+        assert(Socket::type() != Socket::Type::Unix);
 
-#if !MOBILEAPP
-    char addrstr[INET6_ADDRSTRLEN];
+        if (UNITWSD_CALL_INSTANCE(unitWsd, simulateExternalAcceptError()))
+            return nullptr; // Recoverable error, ignore to retry
 
-    Socket::Type type;
-    const void *inAddr;
-    if (clientInfo.sin6_family == AF_INET)
-    {
-        struct sockaddr_in *ipv4 = reinterpret_cast<struct sockaddr_in *>(&clientInfo);
-        inAddr = &(ipv4->sin_addr);
-        type = Socket::Type::IPv4;
+        rc = net::acceptConnection(getFD(), peer);
     }
     else
-    {
-        struct sockaddr_in6 *ipv6 = &clientInfo;
-        inAddr = &(ipv6->sin6_addr);
-        type = Socket::Type::IPv6;
-    }
-    ::inet_ntop(clientInfo.sin6_family, inAddr, addrstr, sizeof(addrstr));
+        rc = fakeSocketAccept4(getFD());
+
+    if (rc < 0)
+        return nullptr;
+
+    LOG_TRC("Accepted socket #" << rc << ", creating socket object.");
+
+    if (Util::isMobileApp())
+        return createSocketFromAccept(rc, Socket::Type::Unix);
 
     const size_t extConnCount = StreamSocket::getExternalConnectionCount();
     if (net::Defaults.maxExtConnections > 0 && extConnCount >= net::Defaults.maxExtConnections)
     {
         LOG_WRN("Limiter rejected extConn[" << extConnCount << "/" << net::Defaults.maxExtConnections << "]: #"
                 << rc << " has family "
-                << clientInfo.sin6_family << ", address " << addrstr << ":" << clientInfo.sin6_port);
-        ::close(rc);
+                << peer.family << ", address " << peer.address << ":" << peer.port);
+        net::closeSocketDescriptor(rc);
         return nullptr;
     }
 
     try
     {
         // Create a socket object using the factory.
-        std::shared_ptr<Socket> socket = createSocketFromAccept(rc, type);
+        std::shared_ptr<Socket> socket = createSocketFromAccept(rc, peer.type);
         UNITWSD_CALL_INSTANCE(unitWsd, simulateExternalSocketCtorException(socket));
 
-        socket->setClientAddress(addrstr, clientInfo.sin6_port);
+        socket->setClientAddress(peer.address, peer.port);
 
-        LOG_TRC("Accepted socket #" << socket->getFD() << " has family " << clientInfo.sin6_family
-                                    << ", " << *socket);
+        LOG_TRC("Accepted socket #" << socket->getFD() << " has family " << peer.family << ", "
+                                    << *socket);
         return socket;
     }
     catch (const std::exception& ex)
@@ -1403,210 +1127,8 @@ std::shared_ptr<Socket> ServerSocket::accept()
         LOG_ERR("Failed to create client socket #" << rc << ". Error: " << ex.what());
     }
     return nullptr;
-#else
-    return createSocketFromAccept(rc, Socket::Type::Unix);
-#endif
 }
 
-#if !MOBILEAPP
-
-int Socket::getPid() const
-{
-    int pid = Syscall::get_peer_pid(_fd);
-    if (pid < 0)
-        LOG_SYS("Failed to get pid via peer creds on " << _fd);
-
-    return pid;
-}
-
-// Does this socket come from the localhost ?
-bool Socket::isLocal() const
-{
-    if (_clientAddress.size() < 1)
-        return false;
-    if (_clientAddress[0] == '/') // Unix socket
-        return true;
-    if (_clientAddress == "::1")
-        return true;
-    return  _clientAddress.rfind("::ffff:127.0.0.", 0) != std::string::npos ||
-                _clientAddress.rfind("127.0.0.", 0) != std::string::npos;
-}
-
-std::shared_ptr<Socket> LocalServerSocket::accept()
-{
-    const int rc = Syscall::accept_cloexec_nonblock(getFD(), nullptr, nullptr);
-    if (rc < 0)
-    {
-        if (isUnrecoverableAcceptError(errno))
-            Util::forcedExit(EX_SOFTWARE);
-        return nullptr;
-    }
-    try
-    {
-        LOG_DBG("Accepted prisoner socket #" << rc << ", creating socket object.");
-
-        std::shared_ptr<Socket> _socket = createSocketFromAccept(rc, Socket::Type::Unix);
-        // Sanity check this incoming socket
-#ifdef __linux__
-#define CREDS_UID(c) c.uid
-#define CREDS_GID(c) c.gid
-#define CREDS_PID(c) c.pid
-        struct ucred creds;
-        socklen_t credSize = sizeof(struct ucred);
-        if (getsockopt(rc, SOL_SOCKET, SO_PEERCRED, &creds, &credSize) < 0)
-        {
-            LOG_SYS("Failed to get peer creds on " << rc);
-            ::close(rc);
-            return std::shared_ptr<Socket>(nullptr);
-        }
-#elif defined(__FreeBSD__)
-#define CREDS_UID(c) c.cr_uid
-#define CREDS_GID(c) c.cr_groups[0]
-#define CREDS_PID(c) c.cr_pid
-        struct xucred creds;
-        socklen_t credSize = sizeof(struct xucred);
-        if (getsockopt(rc, SOL_LOCAL, LOCAL_PEERCRED, &creds, &credSize) < 0)
-        {
-            LOG_SYS("Failed to get peer creds on " << rc);
-            ::close(rc);
-            return std::shared_ptr<Socket>(nullptr);
-        }
-#elif defined(__APPLE__)
-
-        // On macOS, there's no single struct for all three,
-        // so define our own 'apple_creds' combining UID/GID/PID.
-        struct apple_creds {
-            uid_t uid;
-            gid_t gid;
-            pid_t pid;
-        } creds;
-
-        // Macros to unify usage in the rest of the code:
-        #define CREDS_UID(c)  ((c).uid)
-        #define CREDS_GID(c)  ((c).gid)
-        #define CREDS_PID(c)  ((c).pid)
-
-        // Get the effective UID/GID via getpeereid():
-        if (getpeereid(rc, &creds.uid, &creds.gid) != 0)
-        {
-            LOG_SYS("Failed to get peer creds (uid/gid) on " << rc);
-            ::close(rc);
-            return std::shared_ptr<Socket>(nullptr);
-        }
-
-        // Get the peer PID via LOCAL_PEERPID:
-        socklen_t pidLen = sizeof(creds.pid);
-        if (getsockopt(rc, SOL_LOCAL, LOCAL_PEERPID, &creds.pid, &pidLen) < 0)
-        {
-            LOG_SYS("Failed to get peer pid on " << rc);
-            ::close(rc);
-            return std::shared_ptr<Socket>(nullptr);
-        }
-#else
-#error Implement for your platform
-#endif
-
-        uid_t uid = getuid();
-        uid_t gid = getgid();
-        if (CREDS_UID(creds) != uid || CREDS_GID(creds) != gid)
-        {
-            LOG_ERR("Peercred mis-match on domain socket - closing connection. uid: " <<
-                    CREDS_UID(creds) << "vs." << uid << " gid: " << CREDS_GID(creds) << "vs." << gid);
-            ::close(rc);
-            return std::shared_ptr<Socket>(nullptr);
-        }
-        std::string addr("uds-to-pid-");
-        addr.append(std::to_string(CREDS_PID(creds)));
-        _socket->setClientAddress(addr);
-
-        LOG_DBG("Accepted socket #" << rc << " is UDS - address " << addr << " and uid/gid "
-                                    << CREDS_UID(creds) << '/' << CREDS_GID(creds));
-        return _socket;
-    }
-    catch (const std::exception& ex)
-    {
-        LOG_ERR("Failed to create client socket #" << rc << ". Error: " << ex.what());
-    }
-    return nullptr;
-}
-
-/// Returns true on success only.
-UnxSocketPath LocalServerSocket::bind()
-{
-    int rc;
-    struct sockaddr_un addrunix;
-
-    // snap needs a specific socket name
-    std::string socketAbstractUnixName(SOCKET_ABSTRACT_UNIX_NAME);
-    const char* snapInstanceName = std::getenv("SNAP_INSTANCE_NAME");
-    if (snapInstanceName && snapInstanceName[0])
-        socketAbstractUnixName = std::string("snap.") + snapInstanceName + ".coolwsd-";
-
-    LOG_INF("Binding to Unix socket for local server with base name: " << socketAbstractUnixName);
-
-    constexpr auto RandomSuffixLength = 8;
-    constexpr auto MaxSocketAbstractUnixNameLength =
-        sizeof(addrunix.sun_path) - RandomSuffixLength - 2; // 1 byte for null termination, 1 byte for abstract's leading \0
-    LOG_ASSERT_MSG(socketAbstractUnixName.size() < MaxSocketAbstractUnixNameLength,
-                   "SocketAbstractUnixName is too long. Max: " << MaxSocketAbstractUnixNameLength
-                                                               << ", actual: "
-                                                               << socketAbstractUnixName.size());
-
-    int last_errno = 0;
-    do
-    {
-        std::memset(&addrunix, 0, sizeof(addrunix));
-        addrunix.sun_family = AF_UNIX;
-
-        const std::string socketName = socketAbstractUnixName + Util::rng::getFilename(RandomSuffixLength);
-        UnxSocketPath socketPath(socketName);
-        socketPath.fillInto(addrunix);
-
-        rc = ::bind(getFD(), reinterpret_cast<const sockaddr *>(&addrunix), sizeof(struct sockaddr_un));
-        last_errno = errno;
-        LOG_TRC("Binding to Unix socket location ["
-                << socketPath << "], result: " << rc
-                << ((rc >= 0) ? std::string()
-                              : '\t' + Util::symbolicErrno(last_errno) + ": " +
-                                    std::strerror(last_errno)));
-        if (rc >= 0)
-        {
-            _id = socketPath;
-            return socketPath;
-        }
-    } while (rc < 0 && errno == EADDRINUSE);
-
-    LOG_ERR_ERRNO(last_errno, "Failed to bind to Unix socket");
-    return std::string();
-}
-
-bool LocalServerSocket::linkTo([[maybe_unused]] const std::string& toPath)
-{
-#ifndef HAVE_ABSTRACT_UNIX_SOCKETS
-    _linkName = toPath + "/" + _id.getName();
-    return 0 == ::link(_id.getName().c_str(), _linkName.c_str());
-#else
-    return true;
-#endif
-}
-
-LocalServerSocket::~LocalServerSocket()
-{
-#ifndef HAVE_ABSTRACT_UNIX_SOCKETS
-    ::unlink(_id.getName().c_str());
-    if (!_linkName.empty())
-        ::unlink(_linkName.c_str());
-#endif
-}
-
-// For a verbose life, tweak here:
-#if 0
-#  define LOG_CHUNK(X) LOG_TRC(X)
-#else
-#  define LOG_CHUNK(X)
-#endif
-
-#endif // !MOBILEAPP
 
 std::ostream& StreamSocket::stream(std::ostream& os) const
 {
@@ -1660,304 +1182,6 @@ bool StreamSocket::checkRemoval(std::chrono::steady_clock::time_point now)
     return false;
 }
 
-#if !MOBILEAPP
-
-ssize_t StreamSocket::readHeader(const std::string_view clientName, std::istream& message,
-                                 size_t messagesize,
-                                 Poco::Net::HTTPRequest& request,
-                                 std::chrono::duration<float, std::milli> delayMs)
-{
-    static constexpr std::chrono::duration<float, std::milli> delayMax =
-        std::chrono::duration_cast<std::chrono::milliseconds>(SocketPoll::DefaultPollTimeoutMicroS);
-
-    // Find the end of the header, if any.
-    static constexpr std::string_view marker("\r\n\r\n");
-    if (!Util::seekToMatch(message, marker))
-    {
-        LOG_TRC("parseHeader: " << clientName << " doesn't have enough data for the header yet. delay " << delayMs.count() << "ms");
-        return -1;
-    }
-
-    // Skip the marker.
-    ssize_t headerSize = static_cast<ssize_t>(message.tellg()) + marker.size();
-    message.seekg(0, std::ios_base::beg);
-
-    try
-    {
-        request.read(message);
-    }
-    catch (const Poco::Net::NotAuthenticatedException& exc)
-    {
-        LOG_DBG("parseHeader: Exception caught with "
-                << messagesize << " bytes, shutdown: " << exc.displayText() << ", delay "
-                << delayMs.count() << "ms");
-        asyncShutdown();
-        return -1;
-    }
-    catch (const Poco::Net::UnsupportedRedirectException& exc)
-    {
-        LOG_DBG("parseHeader: Exception caught with "
-                << messagesize << " bytes, shutdown: " << exc.displayText() << ", delay "
-                << delayMs.count() << "ms");
-        asyncShutdown();
-        return -1;
-    }
-    catch (const Poco::Net::HTTPException& exc)
-    {
-        LOG_DBG("parseHeader: Exception caught with "
-                << messagesize << " bytes, shutdown: " << exc.displayText() << ", delay "
-                << delayMs.count() << "ms");
-        asyncShutdown();
-        return -1;
-    }
-    catch (const Poco::Exception& exc)
-    {
-        if (delayMs > delayMax)
-        {
-            LOG_DBG("parseHeader: Exception caught with "
-                    << messagesize << " bytes, shutdown: " << exc.displayText() << ", delay "
-                    << delayMs.count() << "ms");
-            asyncShutdown();
-        }
-        else
-        {
-            LOG_DBG("parseHeader: Exception caught with "
-                    << messagesize << " bytes, continue: " << exc.displayText() << ", delay "
-                    << delayMs.count() << "ms");
-        }
-        return -1;
-    }
-    catch (const std::exception& exc)
-    {
-        if (delayMs > delayMax)
-        {
-            LOG_DBG("parseHeader: Exception caught with "
-                    << messagesize << " bytes, shutdown: " << exc.what() << ", delay "
-                    << delayMs.count() << "ms");
-            asyncShutdown();
-        }
-        else
-        {
-            LOG_DBG("parseHeader: Exception caught with "
-                    << messagesize << " bytes, continue: " << exc.what() << ", delay "
-                    << delayMs.count() << "ms");
-        }
-        return -1;
-    }
-
-    return headerSize;
-}
-
-void StreamSocket::handleExpect(const std::string_view expect)
-{
-    if (!_sentHTTPContinue && Util::iequal(expect, "100-continue"))
-    {
-        LOG_TRC("parseHeader: Got Expect: 100-continue, sending Continue");
-        // FIXME: should validate authentication headers early too.
-        send("HTTP/1.1 100 Continue\r\n\r\n",
-             sizeof("HTTP/1.1 100 Continue\r\n\r\n") - 1);
-        _sentHTTPContinue = true;
-    }
-}
-
-bool StreamSocket::checkChunks(const Poco::Net::HTTPRequest& request, size_t headerSize, MessageMap& map,
-                               std::chrono::duration<float, std::milli> delayMs)
-{
-    if (!request.getChunkedTransferEncoding())
-        return true;
-
-    auto itBody = _inBuffer.begin() + headerSize;
-
-    // keep the header
-    map._spans.emplace_back(0, headerSize);
-
-    int chunk = 0;
-    while (itBody != _inBuffer.end())
-    {
-        const auto chunkStart = itBody;
-
-        // skip whitespace
-        for (; itBody != _inBuffer.end() && isascii(*itBody) && isspace(*itBody); ++itBody)
-            ; // skip.
-
-        // each chunk is preceded by its length in hex.
-        size_t chunkLen = 0;
-        bool haveHexDigits = false;
-        for (; itBody != _inBuffer.end(); ++itBody)
-        {
-            int digit = HexUtil::hexDigitFromChar(*itBody);
-            if (digit >= 0)
-            {
-                haveHexDigits = true;
-                chunkLen = chunkLen * 16 + digit;
-                if (chunkLen > http::MaxChunkLen)
-                {
-                    LOG_ERR("Invalid chunk length (" << chunkLen << ") exceeds limit of "
-                                                     << http::MaxChunkLen / 1024 / 1024 << " MB");
-                    return false;
-                }
-            }
-            else
-                break;
-        }
-
-        LOG_CHUNK("parseHeader: Chunk of length " << chunkLen);
-
-        if (chunkLen == 0 && !haveHexDigits)
-        {
-            LOG_ERR("Invalid chunk with no length");
-            return false;
-        }
-
-        for (; itBody != _inBuffer.end() && *itBody != '\n'; ++itBody)
-            ; // skip to end of line
-
-        if (itBody != _inBuffer.end())
-            itBody++; /* \n */;
-
-        // skip the chunk.
-        const auto chunkOffset = itBody - _inBuffer.begin();
-        const auto chunkAvailable = _inBuffer.size() - chunkOffset;
-
-        if (chunkLen == 0) // we're complete.
-        {
-            map._messageSize = chunkOffset;
-            return true;
-        }
-
-        if (chunkLen + 2 > chunkAvailable)
-        {
-            LOG_DBG("parseHeader: Not enough content yet in chunk " << chunk <<
-                    " starting at offset " << (chunkStart - _inBuffer.begin()) <<
-                    " chunk len: " << chunkLen << ", available: " << chunkAvailable << ", delay " << delayMs.count() << "ms");
-            return false;
-        }
-        itBody += chunkLen;
-
-        map._spans.emplace_back(chunkOffset, chunkLen);
-
-        if (*itBody != '\r' || *(itBody + 1) != '\n')
-        {
-            LOG_ERR("parseHeader: Missing \\r\\n at end of chunk " << chunk << " of length " << chunkLen << ", delay " << delayMs.count() << "ms");
-            LOG_CHUNK("Chunk " << chunk << " is: \n"
-                               << HexUtil::dumpHex("", "", chunkStart, itBody + 1, false));
-            asyncShutdown();
-            return false; // TODO: throw something sensible in this case
-        }
-
-        LOG_CHUNK("parseHeader: Chunk "
-                  << chunk << " is: \n"
-                  << HexUtil::dumpHex("", "", chunkStart, itBody + 1, false));
-
-        itBody+=2;
-        chunk++;
-    }
-    LOG_TRC("parseHeader: Not enough chunks yet, so far " << chunk << " chunks of total length " << (itBody - _inBuffer.begin()) << ", delay " << delayMs.count() << "ms");
-    return false;
-}
-
-bool StreamSocket::parseHeader(const std::string_view clientName, size_t headerSize, size_t bufferSize,
-                               const Poco::Net::HTTPRequest& request,
-                               std::chrono::duration<float, std::milli> delayMs,
-                               MessageMap& map)
-{
-    assert(map._headerSize == 0 && map._messageSize == 0);
-
-    map._headerSize = headerSize;
-    map._messageSize = map._headerSize;
-
-    const std::streamsize contentLength = request.getContentLength();
-
-    LOG_INF("parseHeader: " << clientName << " HTTP Request: " << request << ", sz[header "
-                            << map._headerSize << "], offset " << headerSize
-                            << ", contentLength: " << contentLength);
-
-    if (contentLength != Poco::Net::HTTPMessage::UNKNOWN_CONTENT_LENGTH)
-    {
-        // The only valid -ve value is -1 for "unknown content length."
-        if (contentLength < 0 || contentLength > http::MaxBodyLen)
-        {
-            LOG_WRN("parseHeader: Invalid content length ("
-                    << contentLength << "), limit: " << http::MaxBodyLen / 1024 / 1024 << " MB");
-            throw std::out_of_range("Invalid content length: " + std::to_string(contentLength));
-        }
-
-        // Note: The bufferSize (i.e. the data received in the socket) may be
-        // far less than the contentLength, and we may never get all the data.
-        if (bufferSize < contentLength + headerSize)
-        {
-            LOG_DBG("parseHeader: Not enough content yet: ContentLength: "
-                    << contentLength << " (+ headerSize: " << headerSize << " = "
-                    << contentLength + headerSize << "), available: " << bufferSize
-                    << " bytes (missing " << (contentLength + headerSize - bufferSize)
-                    << " bytes), delay " << delayMs.count() << "ms");
-            return false;
-        }
-
-        // messageSize includes both the header and the content sizes.
-        map._messageSize += contentLength;
-    }
-
-    return true;
-}
-
-bool StreamSocket::compactChunks(MessageMap& map)
-{
-    if (!map._spans.size())
-        return false; // single message.
-
-    LOG_CHUNK(
-        "Pre-compact " << map._spans.size() << " chunks: \n"
-                       << HexUtil::dumpHex("", "", _inBuffer.begin(), _inBuffer.end(), false));
-
-    char *first = _inBuffer.data();
-    char *dest = first;
-    for (const auto& [offset, length] : map._spans)
-    {
-        assert(length > 0);
-        assert(offset < _inBuffer.size());
-        assert(offset + length <= _inBuffer.size());
-        std::memmove(dest, &_inBuffer[offset], length);
-        dest += length;
-    }
-
-    // Erase the duplicate bits.
-    size_t newEnd = dest - first;
-    size_t gap = map._messageSize - newEnd;
-    _inBuffer.erase(_inBuffer.begin() + newEnd, _inBuffer.begin() + map._messageSize);
-
-    LOG_CHUNK("Post-compact with erase of "
-              << newEnd << " to " << map._messageSize << " giving: \n"
-              << HexUtil::dumpHex("", "", _inBuffer.begin(), _inBuffer.end(), false));
-
-    // shrink our size to fit
-    map._messageSize -= gap;
-
-#if ENABLE_DEBUG
-    LOG_TRC("Socket state: " <<
-            [this](auto& oss)
-            {
-                oss.setf(std::ios_base::boolalpha);
-                dumpState(oss);
-            });
-#endif
-
-    return true;
-}
-
-bool StreamSocket::sniffSSL() const
-{
-    // Only sniffing the first bytes of a socket.
-    if (bytesSent() > 0 || bytesRcvd() != _inBuffer.size() || bytesRcvd() < 6)
-        return false;
-
-    // 0x0000  16 03 01 02 00 01 00 01
-    return (_inBuffer[0] == 0x16 && // HANDSHAKE
-            _inBuffer[1] == 0x03 && // SSL 3.0 / TLS 1.x
-            _inBuffer[5] == 0x01);  // Handshake: CLIENT_HELLO
-}
-
-#endif // !MOBILEAPP
 
 #ifndef _WIN32
 namespace {

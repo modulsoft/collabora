@@ -52,7 +52,7 @@ class BackstageView extends window.L.Class {
 	constructor(map: any) {
 		super();
 		this.map = map;
-		this.isStarterMode = (window as any).starterScreen;
+		this.isStarterMode = window.starterScreen;
 		this.container = this.createContainer();
 		document.body.appendChild(this.container);
 		this.map?.on(
@@ -258,7 +258,7 @@ class BackstageView extends window.L.Class {
 		const wopi = this.map['wopi'] || {};
 		const featureFlags: Record<string, boolean> = {
 			share: !!wopi.EnableShare,
-			save: !wopi.HideSaveOption,
+			save: !wopi.HideSaveOption && !this.map.isReadOnlyMode(),
 			saveAs:
 				!wopi.UserCanNotWriteRelative ||
 				window.ThisIsTheQtApp ||
@@ -685,10 +685,15 @@ class BackstageView extends window.L.Class {
 		} catch (e) {
 			console.error('Failed to remove cloud provider:', e);
 		}
+		window.app.console.debug('Backstage: removing account ' + id);
+		window.postMobileMessage('removecloudaccount account=' + id);
 	}
 
 	private openCloudProvider(provider: CloudProvider): void {
-		window.postMobileMessage('openremote ' + provider.url);
+		window.app.console.debug('Backstage: opening account ' + provider.id);
+		window.postMobileMessage(
+			'openremote ' + provider.url + ' account=' + provider.id,
+		);
 	}
 
 	private renderNewView(): void {
