@@ -33,6 +33,7 @@
 #include <wsd/RemoteDocumentBroker.hpp>
 
 #include <Poco/Exception.h>
+#include <Poco/File.h>
 #include <Poco/Net/AcceptCertificateHandler.h>
 #include <Poco/Net/Context.h>
 #include <Poco/Net/DNS.h>
@@ -43,6 +44,7 @@
 #include <Poco/Net/KeyConsoleHandler.h>
 #include <Poco/Net/NameValueCollection.h>
 #include <Poco/Net/SSLManager.h>
+#include <Poco/Path.h>
 #include <Poco/StreamCopier.h>
 #include <Poco/URI.h>
 
@@ -170,39 +172,49 @@ WopiStorage::WOPIFileInfo::WOPIFileInfo(const FileInfo& fileInfo, Poco::JSON::Ob
                 << _username << "] will be used until a valid name is specified.");
     }
 
-    // The public part of the remote documents this document may subscribe to.
-    // A server that reads no remote documents keeps none of them.
-    auto relatedDocuments = object->getArray("RelatedDocuments");
-    if (RemoteDocumentBroker::isEnabled() && relatedDocuments)
+    // The public part of the remote links this document may subscribe to.
+    // A server that reads no remote links keeps none of them.
+    auto remoteLinks = object->getArray("RemoteLinks");
+    if (RemoteDocumentBroker::isEnabled() && remoteLinks)
     {
-        for (std::size_t i = 0; i < relatedDocuments->size(); ++i)
+        for (std::size_t i = 0; i < remoteLinks->size(); ++i)
         {
-            auto entry = relatedDocuments->getObject(i);
+            auto entry = remoteLinks->getObject(i);
             if (!entry)
                 continue;
 
             std::string wopiSrc;
             std::string name;
             std::string lastModifiedTime;
+            std::string persistentLink;
             JsonUtil::findJSONValue(entry, "WOPISrc", wopiSrc);
             JsonUtil::findJSONValue(entry, "BaseFileName", name);
             JsonUtil::findJSONValue(entry, "LastModifiedTime", lastModifiedTime);
-            if (!wopiSrc.empty())
-                _relatedDocuments.push_back(
-                    { std::move(wopiSrc), std::move(name), std::move(lastModifiedTime) });
+            JsonUtil::findJSONValue(entry, "PersistentLink", persistentLink);
+
+            // A view reaches a remote link by its persistent link alone.
+            if (wopiSrc.empty() || persistentLink.empty())
+            {
+                LOG_WRN("Ignoring a RemoteLinks entry of CheckFileInfo that names no WOPISrc or "
+                        "no PersistentLink");
+                continue;
+            }
+
+            _remoteLinks.push_back({ std::move(wopiSrc), std::move(name),
+                                     std::move(lastModifiedTime), std::move(persistentLink) });
         }
     }
 
-    // The access tokens for those related documents are private to this view.
+    // The access tokens for those remote links are private to this view.
     if (auto userPrivateInfo = object->getObject("UserPrivateInfo"))
     {
-        if (auto relatedTokens = userPrivateInfo->getArray("RelatedDocuments"))
+        if (auto linkTokens = userPrivateInfo->getArray("RemoteLinks"))
         {
             if (RemoteDocumentBroker::isEnabled())
             {
-                for (std::size_t i = 0; i < relatedTokens->size(); ++i)
+                for (std::size_t i = 0; i < linkTokens->size(); ++i)
                 {
-                    auto entry = relatedTokens->getObject(i);
+                    auto entry = linkTokens->getObject(i);
                     if (!entry)
                         continue;
 
@@ -211,14 +223,14 @@ WopiStorage::WOPIFileInfo::WOPIFileInfo(const FileInfo& fileInfo, Poco::JSON::Ob
                     JsonUtil::findJSONValue(entry, "WOPISrc", wopiSrc);
                     JsonUtil::findJSONValue(entry, "AccessToken", accessToken);
                     if (!wopiSrc.empty() && !accessToken.empty())
-                        _relatedDocumentTokens.push_back(
+                        _remoteLinkTokens.push_back(
                             { std::move(wopiSrc), std::move(accessToken) });
                 }
             }
 
             // A token is private to its view whether or not a document reads it, so it leaves
             // the info that is stored and logged either way.
-            userPrivateInfo->remove("RelatedDocuments");
+            userPrivateInfo->remove("RemoteLinks");
         }
     }
 
@@ -292,11 +304,13 @@ WopiStorage::WOPIFileInfo::WOPIFileInfo(const FileInfo& fileInfo, Poco::JSON::Ob
     JsonUtil::findJSONValue(object, "HideUserList", _hideUserList);
     JsonUtil::findJSONValue(object, "SupportsLocks", _supportsLocks);
     JsonUtil::findJSONValue(object, "SupportsRename", _supportsRename);
+    JsonUtil::findJSONValue(object, "SupportsLinkAccess", _supportsLinkAccess);
     JsonUtil::findJSONValue(object, "UserCanRename", _userCanRename);
     JsonUtil::findJSONValue(object, "BreadcrumbDocName", _breadcrumbDocName);
     JsonUtil::findJSONValue(object, "FileUrl", _fileUrl);
     JsonUtil::findJSONValue(object, "UserCanOnlyComment", _userCanOnlyComment);
     JsonUtil::findJSONValue(object, "UserCanOnlyManageRedlines", _userCanOnlyManageRedlines);
+    JsonUtil::findJSONValue(object, "UserCanChangeSecurityLabel", _userCanChangeSecurityLabel);
     JsonUtil::findJSONValue(object, "PresentationLeader", _presentationLeader);
 
     // check if user is admin on the integrator side
@@ -419,10 +433,48 @@ http::Request WopiStorage::createLockRequest(const Poco::URI& uriObject, const A
     return httpRequest;
 }
 
+namespace
+{
+/// Works out what a lock request's answer means. Shared by the synchronous and
+/// asynchronous paths, which ask the same question of the same response.
+StorageBase::LockUpdateResult
+classifyLockResponse(const std::shared_ptr<const http::Response>& httpResponse,
+                     StorageBase::LockState lock, std::string failureReason)
+{
+    using Status = StorageBase::LockUpdateResult::Status;
+
+    const http::StatusCode statusCode = httpResponse->statusLine().statusCode();
+
+    // No answer at all - timed out in flight, or the connection broke before a
+    // status line arrived - says nothing about whether the host would grant the
+    // lock, so it is worth asking again rather than taking the document away
+    // from the user. An answer whose body we could not make sense of is still
+    // an answer: the status is what we classify on, and we have it.
+    const bool noAnswer =
+        httpResponse->state() == http::Response::State::Timeout ||
+        (httpResponse->state() == http::Response::State::Error &&
+         http::StatusLine(statusCode).statusCategory() ==
+             http::StatusLine::StatusCodeClass::Invalid);
+    const bool unauthorized = !noAnswer && http::isUnauthorizedStatusCode(statusCode);
+    const bool transient = !unauthorized && (noAnswer || http::isTransientStatusCode(statusCode));
+
+    StorageBase::LockUpdateResult result(unauthorized ? Status::UNAUTHORIZED
+                                                      : (transient ? Status::TRANSIENT
+                                                                   : Status::FAILED),
+                                         lock, std::move(failureReason));
+    if (transient && !noAnswer)
+        result.setRetryAfter(http::parseRetryAfter(httpResponse->get("Retry-After")));
+
+    return result;
+}
+} // namespace
+
 StorageBase::LockUpdateResult WopiStorage::updateLockState(const Authorization& auth,
                                                            LockContext& lockCtx,
                                                            StorageBase::LockState lock,
-                                                           const Attributes& attribs)
+                                                           const Attributes& attribs,
+                                                           std::chrono::seconds timeout,
+                                                           SocketPoll* poller)
 {
     if (!lockCtx.supportsLocks())
         return LockUpdateResult(LockUpdateResult::Status::UNSUPPORTED, lock);
@@ -439,12 +491,16 @@ StorageBase::LockUpdateResult WopiStorage::updateLockState(const Authorization& 
     try
     {
         std::shared_ptr<http::Session> httpSession =
-            StorageConnectionManager::getHttpSession(uriObject);
+            StorageConnectionManager::getWopiHttpSession(uriObject, timeout);
 
         http::Request httpRequest = createLockRequest(uriObject, auth, lockCtx, lock, attribs);
 
+        // Wait on the caller's poll where we have one, so that its sockets keep
+        // being served while we are blocked here. Otherwise the request gets a
+        // private poll and everything else waits with us.
         const std::shared_ptr<const http::Response> httpResponse =
-            httpSession->syncRequest(httpRequest);
+            poller ? httpSession->syncRequest(httpRequest, *poller)
+                   : httpSession->syncRequest(httpRequest);
         const std::string& responseString = httpResponse->getBody();
 
         LOG_INF(wopiLog << " status: " << httpResponse->statusLine().statusCode()
@@ -458,13 +514,13 @@ StorageBase::LockUpdateResult WopiStorage::updateLockState(const Authorization& 
 
         failureReason = httpResponse->get("X-WOPI-LockFailureReason", "");
 
-        const bool unauthorized =
-            http::isUnauthorizedStatusCode(httpResponse->statusLine().statusCode());
-
-        LOG_ERR("Un-successful " << wopiLog << " with " << (unauthorized ? "expired token, " : "")
-                                 << "HTTP status " << httpResponse->statusLine().statusCode()
+        LOG_ERR("Un-successful " << wopiLog << " with HTTP status "
+                                 << httpResponse->statusLine().statusCode()
+                                 << ", response state " << httpResponse->state()
                                  << ", failure reason: [" << failureReason << "] and response: ["
                                  << responseString << ']');
+
+        return classifyLockResponse(httpResponse, lock, std::move(failureReason));
     }
     catch (const std::exception& exc)
     {
@@ -514,7 +570,7 @@ void WopiStorage::updateLockStateAsync(const Authorization& auth, LockContext& l
     const auto wopiLog = (lock == StorageBase::LockState::LOCK ? "WOPI::Lock" : "WOPI::Unlock");
     LOG_DBG(wopiLog << " requesting: " << uriAnonym);
 
-    _lockHttpSession = StorageConnectionManager::getHttpSession(uriObject);
+    _lockHttpSession = StorageConnectionManager::getWopiHttpSession(uriObject);
 
     http::Request httpRequest = createLockRequest(uriObject, auth, lockCtx, lock, attribs);
 
@@ -550,21 +606,15 @@ void WopiStorage::updateLockStateAsync(const Authorization& auth, LockContext& l
 
         std::string failureReason = httpResponse->get("X-WOPI-LockFailureReason", "");
 
-        const bool unauthorized =
-            http::isUnauthorizedStatusCode(httpResponse->statusLine().statusCode());
-
-        const StorageBase::LockUpdateResult::Status status =
-            unauthorized ? LockUpdateResult::Status::UNAUTHORIZED
-                         : LockUpdateResult::Status::FAILED;
-
-        LOG_ERR("Un-successful " << wopiLog << " with " << (unauthorized ? "expired token, " : "")
-                                 << "HTTP status " << httpResponse->statusLine().statusCode()
+        LOG_ERR("Un-successful " << wopiLog << " with HTTP status "
+                                 << httpResponse->statusLine().statusCode()
+                                 << ", response state " << httpResponse->state()
                                  << ", failure reason: [" << failureReason << "] and response: ["
                                  << responseString << ']');
 
-        return asyncLockStateCallback(
-            AsyncLockUpdate(AsyncLockUpdate::State::Error,
-                            LockUpdateResult(status, lock, std::move(failureReason))));
+        return asyncLockStateCallback(AsyncLockUpdate(
+            AsyncLockUpdate::State::Error,
+            classifyLockResponse(httpResponse, lock, std::move(failureReason))));
     };
 
     _lockHttpSession->setFinishedHandler(std::move(finishedCallback));
@@ -596,7 +646,7 @@ std::string WopiStorage::downloadStorageFileToLocal(const Authorization& auth,
         {
             LOG_INF("WOPI::GetFile template source: " << templateUriAnonym);
             return downloadDocument(Poco::URI(templateUri), templateUriAnonym, auth,
-                                    HTTP_REDIRECTION_LIMIT);
+                                    HTTP_REDIRECTION_LIMIT, false);
         }
         catch (const std::exception& ex)
         {
@@ -614,7 +664,7 @@ std::string WopiStorage::downloadStorageFileToLocal(const Authorization& auth,
         {
             LOG_INF("WOPI::GetFile using FileUrl: " << fileUrlAnonym);
             return downloadDocument(Poco::URI(_fileUrl), fileUrlAnonym, auth,
-                                    HTTP_REDIRECTION_LIMIT);
+                                    HTTP_REDIRECTION_LIMIT, false);
         }
         catch (const StorageSpaceLowException&)
         {
@@ -640,7 +690,7 @@ std::string WopiStorage::downloadStorageFileToLocal(const Authorization& auth,
     try
     {
         LOG_INF("WOPI::GetFile using default URI: " << uriAnonym);
-        return downloadDocument(uriObject, uriAnonym, auth, HTTP_REDIRECTION_LIMIT);
+        return downloadDocument(uriObject, uriAnonym, auth, HTTP_REDIRECTION_LIMIT, true);
     }
     catch (const std::exception& ex)
     {
@@ -651,11 +701,13 @@ std::string WopiStorage::downloadStorageFileToLocal(const Authorization& auth,
 }
 
 std::string WopiStorage::downloadDocument(const Poco::URI& uriObject, const std::string& uriAnonym,
-                                          const Authorization& auth, unsigned redirectLimit)
+                                          const Authorization& auth, unsigned redirectLimit,
+                                          bool hostChecked)
 {
     const auto startTime = std::chrono::steady_clock::now();
     std::shared_ptr<http::Session> httpSession =
-        StorageConnectionManager::getHttpSession(uriObject);
+        hostChecked ? StorageConnectionManager::getWopiHttpSession(uriObject)
+                    : StorageConnectionManager::getHttpSession(uriObject);
 
     const http::Request httpRequest = StorageConnectionManager::createHttpRequest(uriObject, auth);
 
@@ -705,7 +757,8 @@ std::string WopiStorage::downloadDocument(const Poco::URI& uriObject, const std:
             LOG_TRC("WOPI::GetFile redirect to URI [" << Anonymizer::anonymizeUrl(location) << ']');
 
             Poco::URI redirectUriObject(location);
-            return downloadDocument(redirectUriObject, uriAnonym, auth, redirectLimit - 1);
+            return downloadDocument(redirectUriObject, uriAnonym, auth, redirectLimit - 1,
+                                    false);
         }
         else
         {
@@ -816,7 +869,7 @@ std::size_t WopiStorage::uploadLocalFileToStorageAsync(
     try
     {
         assert(!_uploadHttpSession && "Unexpected to have an upload http::session");
-        _uploadHttpSession = StorageConnectionManager::getHttpSession(uriObject);
+        _uploadHttpSession = StorageConnectionManager::getWopiHttpSession(uriObject);
 
         http::Request httpRequest = StorageConnectionManager::createHttpRequest(uriObject, auth);
         httpRequest.setVerb(http::Request::VERB_POST);
@@ -905,7 +958,9 @@ std::size_t WopiStorage::uploadLocalFileToStorageAsync(
                                           httpResponse->statusLine().statusCode(),
                                           isSaveAs,
                                           isRename,
-                                          httpResponse->header().has("X-WOPI-Lock") };
+                                          httpResponse->header().has("X-WOPI-Lock"),
+                                          http::parseRetryAfter(
+                                              httpResponse->get("Retry-After")) };
 
             // Handle the response.
             StorageBase::UploadResult res =
@@ -972,10 +1027,14 @@ WopiStorage::handleUploadToStorageResponse(const WopiUploadDetails& details,
 
     // An Invalid status category means we never got a response: the request
     // timed out or the connection was dropped, and the host may or may not have
-    // written the file. Any other status is an answer from the host, and an
-    // answer that isn't success means it did not write the file.
-    result.setDefiniteFailure(http::StatusLine(details.httpResponseCode).statusCategory() !=
-                              http::StatusLine::StatusCodeClass::Invalid);
+    // written the file. A transient status is the host asking us to come back
+    // later, which says just as little: it may have written the file and failed
+    // afterwards, or never got that far. Only a settled answer that isn't
+    // success tells us the file was not written.
+    const bool answered = http::StatusLine(details.httpResponseCode).statusCategory() !=
+                          http::StatusLine::StatusCodeClass::Invalid;
+    result.setDefiniteFailure(answered && !http::isTransientStatusCode(details.httpResponseCode));
+    result.setRetryAfter(details.retryAfter);
     try
     {
         // Save a copy of the response because we might need to anonymize.

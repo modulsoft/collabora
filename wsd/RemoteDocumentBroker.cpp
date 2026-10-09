@@ -138,7 +138,7 @@ void HeadlessClientSession::sendHandshake()
     // The chain travels in the load message: a URL query value would be
     // decoded once per RequestDetails::sanitizeURI pass and the docKeys'
     // own encoding would not survive that.
-    std::string loadMessage = "load url=" + _loadUrl + " readonly=1";
+    std::string loadMessage = "load url=" + _loadUrl;
     if (!_docKeyChain.empty())
         loadMessage += " remotechain=" + _docKeyChain;
     sendTextMessage(loadMessage);
@@ -580,9 +580,9 @@ void RemoteDocument::dumpState(std::ostream& os) const
 
 RemoteDocumentBroker::RemoteDocumentBroker()
     : SocketPoll("remotedocbroker")
-    , _maxChainDepth(ConfigUtil::getConfigValue<int>("remote_documents.max_chain_depth", 3))
+    , _maxChainDepth(ConfigUtil::getConfigValue<int>("remote_links.max_chain_depth", 3))
     , _reconnectAttemptLimit(
-          ConfigUtil::getConfigValue<int>("remote_documents.reconnect_attempts", 5))
+          ConfigUtil::getConfigValue<int>("remote_links.reconnect_attempts", 5))
     , _threadStarted(false)
 {
 }
@@ -590,7 +590,7 @@ RemoteDocumentBroker::RemoteDocumentBroker()
 bool RemoteDocumentBroker::isEnabled()
 {
     static const bool enabled =
-        ConfigUtil::getConfigValue<bool>("remote_documents.enable", false);
+        ConfigUtil::getConfigValue<bool>("remote_links.enable", false);
     return enabled;
 }
 
@@ -601,7 +601,7 @@ std::string RemoteDocumentBroker::getServerUrl()
         const bool secure = ConfigUtil::isSslEnabled();
 
         std::string url =
-            ConfigUtil::getConfigValue<std::string>("remote_documents.server_url", "");
+            ConfigUtil::getConfigValue<std::string>("remote_links.server_url", "");
         if (url.empty())
         {
             std::string authority = COOLWSD::ServerName;
@@ -646,11 +646,11 @@ const std::string& RemoteDocumentBroker::getChainSecret()
     static const std::string secret = []() -> std::string
     {
         std::string configured =
-            ConfigUtil::getConfigValue<std::string>("remote_documents.chain_secret", "");
+            ConfigUtil::getConfigValue<std::string>("remote_links.chain_secret", "");
         if (!configured.empty())
             return configured;
 
-        LOG_WRN("RemoteDoc: no remote_documents.chain_secret is configured, so a connection "
+        LOG_WRN("RemoteDoc: no remote_links.chain_secret is configured, so a connection "
                 "chain is accepted only from this process. Set one, the same on every node, to "
                 "let the nodes of a cluster refuse the connection cycles they form together");
         return Util::rng::getHexString(GeneratedSecretLengthBytes);
@@ -814,7 +814,7 @@ void RemoteDocumentBroker::subscribe(const RemoteDocumentRequest& request)
     if (it == _remoteDocuments.end())
     {
         const size_t maxRemoteDocuments =
-            ConfigUtil::getConfigValue<int>("remote_documents.max_remote_docs", 16);
+            ConfigUtil::getConfigValue<int>("remote_links.max_remote_docs", 16);
         if (_remoteDocuments.size() >= maxRemoteDocuments)
         {
             LOG_WRN("RemoteDoc: rejecting the subscription of ["

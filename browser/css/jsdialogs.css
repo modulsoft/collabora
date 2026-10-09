@@ -638,8 +638,11 @@ td.jsdialog > [id^='table-box']:not(.sidebar) {
 	align-items: stretch;
 }
 
+/* A page that is not the open one keeps the same layout as the open page, so the
+   shared grid cell is as large as the largest page and keeps that size on a tab
+   switch. */
 .ui-tabs-content.jsdialog > .ui-content.hidden {
-	display: inherit !important;
+	display: flex !important;
 	visibility: hidden;
 }
 
@@ -1654,6 +1657,16 @@ img.context-menu-icon {
 	outline: none;
 }
 
+.jsdialog.ui-slider {
+	width: 100%;
+	margin: 0;
+	accent-color: var(--color-primary);
+}
+
+.jsdialog.ui-slider:disabled {
+	opacity: 0.5;
+}
+
 .spinfieldbuttons {
 	display: flex;
 	flex-direction: column;
@@ -1807,6 +1820,12 @@ img.ui-combobox-value-preview {
 	   the text. Setting display here breaks the picker. */
 	.ui-listbox {
 		align-items: center;
+		/* Keep the selected value on one line and cut it off at the end padding, so a long
+		   value stays inside the box and clear of the arrow, as the plain control does. The
+		   option list opens in the top layer, outside this box. */
+		white-space: nowrap;
+		overflow: clip;
+		overflow-clip-margin: content-box;
 	}
 
 	/* Make the picker match the combobox dropdown popup, which is a modalpopup dialog. */
@@ -1906,6 +1925,10 @@ img.ui-combobox-value-preview {
 	padding-inline: 5px;
 }
 
+.current-font-missing #fontnamecombobox > .ui-combobox-content {
+	background-color: color-mix(in srgb, var(--color-warning) 40%, var(--color-background-lighter));
+}
+
 /* Similar to .arrowbackground, centers the vector dropdown arrow. */
 .ui-combobox-button {
 	box-sizing: border-box;
@@ -1917,6 +1940,10 @@ img.ui-combobox-value-preview {
 	background-color: transparent;
 	padding-inline: 10px;
 	border: none;
+}
+
+.ui-combobox-button[disabled]:hover {
+	background-color: transparent;
 }
 
 .ui-combobox-button:hover {
@@ -2041,6 +2068,13 @@ img.ui-combobox-value-preview {
 
 .ui-combobox-entry.ui-linewidth-lastcustom::before {
 	height: var(--ui-linewidth-preview-height, 0);
+}
+
+.modalpopup[id$='-dropdown']
+.jsdialog.ui-separator.horizontal.ui-linewidth-section-separator {
+	height: 2px;
+	margin: 6px 0;
+	background-color: var(--color-border);
 }
 
 .ui-linewidth-custom {
@@ -2455,7 +2489,10 @@ img.ui-combobox-value-preview {
 }
 
 /* start: layouting has less cost when we have thousands of entries */
-.autofilter.ui-treeview-entry:not(.ui-treeview-tree) {
+/* A row the search box filters out carries the hidden class. Leaving such a row
+   out here lets its display: none win, as both declarations are important and
+   the more specific selector would otherwise take it. */
+.autofilter.ui-treeview-entry:not(.ui-treeview-tree):not(.hidden) {
 	display: table-row !important;
 }
 .autofilter.ui-treeview-entry:not(.ui-treeview-tree) > div,
@@ -2697,6 +2734,11 @@ img.ui-combobox-value-preview {
 	display: none;
 }
 
+/* In the FormatCellsDialog. */
+#CellProtectionPage #label1 {
+	max-width: 52ch; /* wraps the long note instead of widening the page */
+}
+
 /* Macros dialog */
 
 #MacroWarnMedium label {
@@ -2811,6 +2853,32 @@ img.ui-combobox-value-preview {
 	display: flex;
 	align-items: center;
 	justify-content: center;
+}
+
+/* A menu button that asks for its content at one end shows it there, the way a
+ * list box shows its text. The arrow stays at the far end of the button. */
+.jsdialog.menubutton.content-start {
+	justify-content: flex-start;
+}
+
+.jsdialog.menubutton.content-start .arrow {
+	margin-inline-start: auto;
+}
+
+.jsdialog.menubutton.content-end {
+	justify-content: flex-end;
+}
+
+/* The generic secondary button rule in btns.css hands every button a 5px side
+ * margin and a width that follows its content. In a grid that pushes a menu
+ * button out of its column, so it no longer lines up with the list boxes and
+ * spin fields in the rows around it. A cell takes its width from the column,
+ * so both are undone here. The rule in btns.css names a long list of classes
+ * at once, so these need !important to win against it. A hidden menu button
+ * keeps the zero width that every hidden grid child has. */
+.ui-grid > button.jsdialog.menubutton:not(.hidden) {
+	margin-inline: 0 !important;
+	width: auto !important;
 }
 
 .jsdialog.menubutton img {
@@ -3427,6 +3495,12 @@ button.has-img img {
 
 .ui-drawing-area-container {
 	margin: auto;
+}
+
+.ui-drawing-area:focus-visible {
+	outline: 2px solid var(--color-primary);
+	outline-offset: 2px;
+	border-radius: var(--border-radius);
 }
 
 /* Writer - Insert - Page Number - page preview image */
@@ -4113,8 +4187,17 @@ kbd,
 	outline-offset: -2px;
 }
 
+/* The fill the canvas draws for a text selection in the slide. */
+.ui-editengine::selection,
+.ui-editengine *::selection {
+	background: rgba(var(--doc-type), 0.25);
+}
+
 .ui-editengine .ui-editengine-paragraph {
 	min-height: 1.4em;
+	/* Each paragraph keeps the height of its text when the text is taller than the editor, and the
+	   editor scrolls. */
+	flex-shrink: 0;
 }
 
 .ui-editengine .ui-editengine-paragraph[data-bullet]::before {
@@ -4124,6 +4207,24 @@ kbd,
 	margin-inline-end: 0.25em;
 	/* Render the bullet in the app font, which has the glyph, not the paragraph's document font. */
 	font-family: var(--cool-font);
+}
+
+/* Another user edits the text, so this view only shows it. The name comes first, marked with the
+   color of that user. */
+.ui-editengine[data-locked-by] {
+	cursor: default;
+}
+
+.ui-editengine[data-locked-by]::before {
+	content: attr(data-locked-by);
+	display: block;
+	margin-bottom: 4px;
+	padding-inline-start: 6px;
+	border-inline-start: 3px solid var(--editengine-locked-color, var(--color-primary));
+	color: var(--color-main-text);
+	font-family: var(--cool-font);
+	font-style: italic;
+	user-select: none;
 }
 
 .ui-editengine .ui-editengine-spell-error {
@@ -4512,7 +4613,8 @@ kbd,
 
 /* Listbox UI grid */
 /* exclude text/bg color-picker: it's not a scolling list */
-.jsdialog.ui-grid[role='listbox']:not(:has(> .ui-iconview)):not(:has(> .ui-color-picker)) {
+/* and exclude the context menu and its submenus, whose placement keeps them inside the window: */
+.jsdialog.ui-grid[role='listbox']:not(:has(> .ui-iconview)):not(:has(> .ui-color-picker)):not([id^='jsd-context-menu-entries']) {
 	max-height: min(470px, calc(0.45 * var(--dialog-available-height)));
 }
 
@@ -4638,7 +4740,11 @@ div [id^='themeview'].ui-iconview-entry, div [id^='themeview1col'].ui-iconview-e
 
 #ChartDataDialog #datagrid.ui-treeview {
 	overflow-x: auto;
-	grid-auto-columns: minmax(80px, auto);
+	/* An intrinsic minimum lets a column grow to fit its title (bold
+	   "Categories" at 125% zoom is wider than 80px); a fixed minimum would
+	   let the title overflow under the next header. The 80px floor moves to
+	   the header cell below. */
+	grid-auto-columns: minmax(min-content, auto);
 }
 
 /* Align header text (e.g. "Categories") to bottom, matching columns with series names */
@@ -4646,6 +4752,8 @@ div [id^='themeview'].ui-iconview-entry, div [id^='themeview1col'].ui-iconview-e
 	display: flex;
 	flex-direction: column;
 	background-color: var(--color-background-dark);
+	min-width: 80px;
+	box-sizing: border-box;
 }
 
 #ChartDataDialog .ui-treeview-header .ui-treeview-header-text,
@@ -4667,6 +4775,10 @@ div [id^='themeview'].ui-iconview-entry, div [id^='themeview1col'].ui-iconview-e
 	font-size: var(--default-font-size);
 	background: var(--color-background-lighter);
 	box-sizing: border-box;
+	min-width: 0;
+	/* Fixed height so the header row does not jump while editing */
+	height: 1.6em;
+	flex: 0 0 auto;
 }
 /* Inline cell editing input */
 #ChartDataDialog .ui-treeview-inline-edit {

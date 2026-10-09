@@ -28,6 +28,8 @@ class MouseControl extends CanvasSectionObject {
 	clickCount: number = 0;
 	pendingClickInfo: any | null = null;
 	positionOnMouseDown: cool.SimplePoint | null = null;
+	// The keyboard modifier that was held when the button went down.
+	modifierOnMouseDown: number = 0;
 	localPositionOnMouseDown: cool.SimplePoint | null = null;
 	mouseDownSent: boolean = false;
 
@@ -43,7 +45,9 @@ class MouseControl extends CanvasSectionObject {
 	swipeTimeStamp: number = 0;
 	amplitude: number[] = [0, 0];
 	touchstart: number = 0;
-	previousViewedRectangle: cool.SimpleRectangle | null = null; // To check if we hit the borders of document.
+
+	// Section-local position of the previous touchmove during a one-finger drag.
+	lastTouchDragPoint: cool.SimplePoint | null = null;
 
 	constructor(name: string) {
 		super(name);
@@ -221,6 +225,26 @@ class MouseControl extends CanvasSectionObject {
 	}
 
 	private setCursorType() {
+		/*
+			The shapes the client holds can say what lies under the mouse, so while they answer for
+			the pointer it is set from them, with the mouse rather than a round trip later. The hand
+			over a hyperlink is the one answer only the engine knows, since a link is a property of
+			the text and not of the geometry held here, so it shows while the engine reports it.
+		*/
+		if (RenderGeometrySection.answersPointer()) {
+			const pointer =
+				app.map._docLayer._coreMousePointer === 'pointer'
+					? 'pointer'
+					: RenderGeometrySection.pointerAt(
+							this.currentPosition.x,
+							this.currentPosition.y,
+						);
+			const cursor = Cursor.getCustomCursor(pointer) || pointer;
+			if (this.context.canvas.style.cursor !== cursor)
+				this.context.canvas.style.cursor = cursor;
+			return;
+		}
+
 		const corePointer = app.map._docLayer._coreMousePointer;
 
 		if (app.map._docLayer._docType === 'spreadsheet') {
@@ -286,6 +310,14 @@ class MouseControl extends CanvasSectionObject {
 			this.containerObject.stopAnimating();
 	}
 
+	// Scrolls by a core pixel distance, as a scroll the user makes with a finger. Returns
+	// true when the view position changed.
+	private scrollViewBy(pX: number, pY: number): boolean {
+		Util.ensureValue(app.activeDocument);
+		const userIsScrolling = true;
+		return app.activeDocument.activeLayout.scroll(pX, pY, userIsScrolling);
+	}
+
 	onDraw(frameCount?: number, elapsedTime?: number): void {
 		if (this.inSwipeAction) {
 			const elapsed = Date.now() - this.swipeTimeStamp;
@@ -294,26 +326,8 @@ class MouseControl extends CanvasSectionObject {
 				this.amplitude[1] * Math.exp(-elapsed / 650),
 			];
 
-			Util.ensureValue(app.activeDocument);
-
 			if (Math.abs(delta[0]) > 0.2 || Math.abs(delta[1]) > 0.2) {
-				app.activeDocument.activeLayout.scrollTo(
-					app.activeDocument.activeLayout.viewedRectangle.pX1 + delta[0],
-					app.activeDocument.activeLayout.viewedRectangle.pY1 + delta[1],
-				);
-				app.sectionContainer.requestReDraw();
-
-				if (this.previousViewedRectangle) {
-					if (
-						app.activeDocument.activeLayout.viewedRectangle.equals(
-							this.previousViewedRectangle.toArray(),
-						)
-					)
-						this.cancelSwipe();
-				}
-
-				this.previousViewedRectangle =
-					app.activeDocument.activeLayout.viewedRectangle.clone();
+				if (!this.scrollViewBy(delta[0], delta[1])) this.cancelSwipe();
 			} else this.cancelSwipe();
 		}
 	}
@@ -325,12 +339,7 @@ class MouseControl extends CanvasSectionObject {
 		Some constants are changed based on the testing/experimenting/trial-error
 	*/
 	private swipe(e: any): void {
-		this.previousViewedRectangle = null;
-
-		const velocityX = app.map._docLayer.isCalcRTL()
-			? -e.velocityX
-			: e.velocityX;
-		const pointVelocity = [velocityX, e.velocityY];
+		const pointVelocity = [e.velocityX, e.velocityY];
 
 		if (this.inSwipeAction) {
 			this.swipeVelocity[0] += pointVelocity[0];
@@ -385,35 +394,31 @@ class MouseControl extends CanvasSectionObject {
 					modifier,
 				);
 			}, 100);
-		} else if (e.type === 'touchmove' && this.positionOnMouseDown) {
+		} else if (e.type === 'touchmove' && this.lastTouchDragPoint) {
 			// For non-touch events, we can select text etc, so we send the mouse button events to core while dragging.
 			// Users can scroll the view using keyboard or mouse wheel, or the scroll bars in those devices.
 			// On touch devices, dragging (touchmove) is used to scroll the view.
 			// We don't send the mouse button down and up events to core while dragging (touchmove). Instead, we scroll the view.
-			const diff = this.currentPosition.clone();
-			diff.x -= this.positionOnMouseDown.x;
-			diff.y -= this.positionOnMouseDown.y;
-
-			Util.ensureValue(app.activeDocument);
-			const viewedRectangle =
-				app.activeDocument.activeLayout.viewedRectangle.clone();
-
-			// Use scrollTo, or repeating events break the scrolling.
-			app.activeDocument.activeLayout.scrollTo(
-				viewedRectangle.pX1 - diff.pX,
-				viewedRectangle.pY1 - diff.pY,
+			// Scroll by the finger's travel. A canvas distance is valid in every view layout.
+			this.scrollViewBy(
+				this.lastTouchDragPoint.pX - point.pX,
+				this.lastTouchDragPoint.pY - point.pY,
 			);
+			this.lastTouchDragPoint = point.clone();
 		} else {
 			this.lastDragLocalPoint = point.clone();
 			this.lastDragModifier = modifier;
 
+			// The button-down goes to core only once the drag has started, but with the
+			// modifier held at the press. A key pressed later, such as Ctrl to copy,
+			// reaches core with the moves and the button-up.
 			if (!this.mouseDownSent && this.positionOnMouseDown) {
 				this.postCoreMouseEvent(
 					'buttondown',
 					this.positionOnMouseDown,
 					count,
 					app.LOButtons.left,
-					modifier,
+					this.modifierOnMouseDown,
 				);
 				this.mouseDownSent = true;
 			}
@@ -490,10 +495,12 @@ class MouseControl extends CanvasSectionObject {
 	onMouseDown(point: cool.SimplePoint, e: MouseEvent): void {
 		this.refreshPosition(point);
 		this.positionOnMouseDown = this.currentPosition.clone();
+		this.modifierOnMouseDown = MouseControl.readModifier(e);
 
 		if (e.type === 'touchstart') {
 			// For swipe action.
 			this.localPositionOnMouseDown = point.clone();
+			this.lastTouchDragPoint = point.clone();
 			this.touchstart = Date.now();
 		}
 	}
@@ -529,6 +536,7 @@ class MouseControl extends CanvasSectionObject {
 		}
 
 		this.positionOnMouseDown = null;
+		this.lastTouchDragPoint = null;
 		this.mouseDownSent = false;
 		this.lastDragLocalPoint = null;
 

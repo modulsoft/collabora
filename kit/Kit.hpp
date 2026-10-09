@@ -162,11 +162,6 @@ public:
 
     static KitSocketPoll* getMainPoll() { return mainPoll; }
 
-    /// Queue a callback to run on the kit thread that serves the given
-    /// document. Returns true when it was queued, false when no live poll
-    /// serves that document.
-    static bool scheduleOnKitThread(unsigned mobileAppDocId, const CallbackFn& fn);
-
 #if ENABLE_DEBUG
     struct ReEntrancyGuard
     {
@@ -294,6 +289,10 @@ private:
         _queue->putCallback(-1, type, payload);
     }
 
+    /// Hands a vector primitives delta to every session that draws vector content, compressed
+    /// once for all of them.
+    void deliverVectorDelta(const std::string& payload);
+
     /// Cleanup bgSave child processes.
     static void reapZombieChildren();
 
@@ -305,8 +304,7 @@ private:
 public:
     /// Request loading a document, or a new view, if one exists,
     /// and register callbacks.
-    bool onLoad(const std::string& sessionId, const std::string& uriAnonym,
-                const std::string& renderOpts);
+    bool onLoad(const std::string& sessionId, const std::string& uriAnonym);
 
     /// Unload a client session, which unloads the document
     /// if it is the last and only.
@@ -402,15 +400,15 @@ private:
 
     static std::string getDefaultBackgroundTheme(const std::shared_ptr<ChildSession>& session);
 
-    std::shared_ptr<COKitDocument> load(const std::shared_ptr<ChildSession>& session,
-                                        const std::string& renderOpts);
+    std::shared_ptr<COKitDocument> load(const std::shared_ptr<ChildSession>& session);
 
     bool forwardToChild(std::string_view prefix, const std::vector<char>& payload);
 
-    static std::string makeRenderParams(const std::string& renderOpts, const std::string& userName,
+    static std::string makeRenderParams(const std::string& userName,
                                         const std::string& spellOnline,
                                         const std::string& formattingMarks, const std::string& theme,
                                         const std::string& backgroundTheme,
+                                        const std::string& focusRingColor,
                                         const std::string& userPrivateInfo);
 
     /// Returns true iff at least one session is loaded.
@@ -526,7 +524,6 @@ private:
     const std::string _url;
     const std::string _obfuscatedFileId;
     std::string _jailedUrl;
-    std::string _renderOpts;
 
     std::shared_ptr<COKitDocument> _loKitDocument;
 #ifdef __ANDROID__

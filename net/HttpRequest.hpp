@@ -38,6 +38,7 @@
 #include <iostream>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -258,6 +259,57 @@ constexpr bool isUnauthorizedStatusCode(StatusCode code)
 {
     return code == StatusCode::Unauthorized || code == StatusCode::Forbidden ||
            code == StatusCode::NotFound;
+}
+
+/// Returns true for status codes where the host is asking us to come back later,
+/// rather than giving us its answer (429, 500, 502, 503, 504). The rest of 5xx is
+/// a settled condition - unimplemented, unsupported, out of space - and retrying
+/// it only adds load to a host that has already told us what it thinks.
+constexpr bool isTransientStatusCode(StatusCode code)
+{
+    return code == StatusCode::TooManyRequests || code == StatusCode::InternalServerError ||
+           code == StatusCode::BadGateway || code == StatusCode::ServiceUnavailable ||
+           code == StatusCode::GatewayTimeout;
+}
+
+/// The longest delay we will take from a host's Retry-After. A host asking us
+/// to come back in an hour would otherwise hold the document that long, and our
+/// own fallback is a better answer than obeying an extreme one.
+constexpr std::chrono::seconds MaxRetryAfter(60);
+
+/// The shortest delay we will take from a host's Retry-After. Zero is a valid
+/// answer, and taken at face value it puts the next attempt back to back with
+/// the one a busy host has just turned away.
+constexpr std::chrono::seconds MinRetryAfter(1);
+
+/// The delay a host asked for in its Retry-After header (RFC 9110), clamped to
+/// MaxRetryAfter. Only the delta-seconds form is read: the HTTP-date form needs
+/// a clock the two machines agree on, and every caller has its own default to
+/// fall back on, so guessing is worse than declining to answer.
+inline std::optional<std::chrono::seconds> parseRetryAfter(const std::string& value)
+{
+    // Digits and nothing else. NumUtil would skip leading whitespace and report
+    // a negative as Overflow, which we must not mistake for a long wait, and a
+    // trailing unit would parse as Partial rather than being rejected.
+    if (value.empty() || std::find_if(value.begin(), value.end(), [](const char ch)
+                                      { return ch < '0' || ch > '9'; }) != value.end())
+        return std::nullopt; // An HTTP-date, or something we don't understand.
+
+    std::size_t offset = 0;
+    const auto [seconds, status] = NumUtil::parseStrTo<std::uint64_t>(value, offset);
+    if (status == NumUtil::StrToState::Overflow)
+        return MaxRetryAfter; // Longer than we can hold, which the clamp answers anyway.
+
+    if (status != NumUtil::StrToState::Complete)
+        return std::nullopt;
+
+    // Clamp before converting. seconds too large for the duration's signed
+    // representation wrap to a negative delay, which a clamp applied afterwards
+    // would take as the smaller of the two and hand back as no wait at all.
+    if (seconds > static_cast<std::uint64_t>(MaxRetryAfter.count()))
+        return MaxRetryAfter;
+
+    return std::max<std::chrono::seconds>(std::chrono::seconds(seconds), MinRetryAfter);
 }
 
 /// Returns the Reason Phrase for a given HTTP Status Code.
@@ -1561,6 +1613,12 @@ public:
     /// Get the timeout, in microseconds.
     std::chrono::microseconds getTimeout() const { return _timeout; }
 
+    /// Connect only to those resolved addresses of the host that addressFilter allows.
+    void setAddressFilter(net::AddressFilter addressFilter)
+    {
+        _addressFilter = std::move(addressFilter);
+    }
+
     /// The response we _got_ for our request. Do *not* use this to _send_ a response!
     const std::shared_ptr<Response>& response() const { return _response; }
     const std::string& getUrl() const { return _request.getUrl(); }
@@ -1758,6 +1816,7 @@ public:
         os << indent << "\thost: " << _host;
         os << indent << "\tport: " << _port;
         os << indent << "\tprotocol: " << name(_protocol);
+        os << indent << "\taddressFilter: " << (_addressFilter ? "set" : "none");
         os << indent << "\thandshakeSslVerifyFailure: " << _handshakeSslVerifyFailure;
         os << indent << "\tstartTime: " << Util::getTimeForLog(now, _startTime);
         _request.dumpState(os, indent + '\t');
@@ -2076,7 +2135,7 @@ private:
         ASSERT_CORRECT_THREAD();
         _socket.reset(); // Reset to make sure we are disconnected.
         std::shared_ptr<StreamSocket> socket =
-            net::connect(_host, _port, isSecure(), shared_from_this());
+            net::connect(_host, _port, isSecure(), shared_from_this(), _addressFilter);
         assert((!socket || _fd == socket->getFD()) &&
                "The socket FD must have been set in onConnect");
 
@@ -2143,7 +2202,8 @@ private:
             disposition.execute();
         };
 
-        net::asyncConnect(_host, _port, isSecure(), shared_from_this(), pushConnectCompleteToPoll);
+        net::asyncConnect(_host, _port, isSecure(), shared_from_this(), pushConnectCompleteToPoll,
+                          _addressFilter);
     }
 
     bool checkTimeout(std::chrono::steady_clock::time_point now) override
@@ -2183,6 +2243,8 @@ private:
     const std::string _host;
     const std::string _port;
     const Protocol _protocol;
+    /// Which resolved addresses of the host may be used. Every address may be used when empty.
+    net::AddressFilter _addressFilter;
     int _fd; ///< The socket file-descriptor.
     long _handshakeSslVerifyFailure; ///< Save SslVerityResult at onHandshakeFail
     std::chrono::microseconds _timeout;

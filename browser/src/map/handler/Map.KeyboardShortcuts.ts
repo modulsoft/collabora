@@ -317,6 +317,15 @@ class KeyboardShortcuts {
             throw 'KeyboardShortcuts not initialized';
         }
 
+        // The language comes from the URL, so it can carry a region -
+        // 'de-DE' rather than 'de'.  Only a few of those have a table of
+        // their own ('pt-BR'); the rest use their base language's, the way
+        // the shortcut tooltips already do.
+        const dash = language.indexOf('-');
+        if (dash !== -1 && !this.definitions.has(language)) {
+            language = language.substring(0, dash);
+        }
+
         if (this.processEventImpl(language, event)) {
             return true;
         }
@@ -496,6 +505,8 @@ keyboardShortcuts.definitions.set('default', new Array<ShortcutDescriptor>(
     new ShortcutDescriptor({ docType: 'presentation', eventType: 'keydown', key: 'F5', dispatchAction: 'presentation' }),
     new ShortcutDescriptor({ docType: 'presentation', eventType: 'keydown', key: 'PageUp', dispatchAction: 'previouspart', viewType: ViewType.ReadOnly }),
     new ShortcutDescriptor({ docType: 'presentation', eventType: 'keydown', key: 'PageDown', dispatchAction: 'nextpart', viewType: ViewType.ReadOnly }),
+    new ShortcutDescriptor({ docType: 'presentation', eventType: 'keydown', modifier: Mod.CTRL, key: 'a', dispatchAction: 'selectallslides',
+        condition: () => app.map.keyboard._slideSorterFocused() }),
 
     // Draw.
     new ShortcutDescriptor({ docType: 'drawing', eventType: 'keydown', key: 'F5' }),
@@ -503,6 +514,8 @@ keyboardShortcuts.definitions.set('default', new Array<ShortcutDescriptor>(
     new ShortcutDescriptor({ docType: 'drawing', eventType: 'keydown', key: 'PageDown', dispatchAction: 'nextpart', viewType: ViewType.ReadOnly }),
     new ShortcutDescriptor({ docType: 'drawing', eventType: 'keydown', key: 'End', dispatchAction: 'lastpart', viewType: ViewType.ReadOnly }),
     new ShortcutDescriptor({ docType: 'drawing', eventType: 'keydown', key: 'Home', dispatchAction: 'firstpart', viewType: ViewType.ReadOnly }),
+    new ShortcutDescriptor({ docType: 'drawing', eventType: 'keydown', modifier: Mod.CTRL, key: 'a', dispatchAction: 'selectallslides',
+        condition: () => app.map.keyboard._slideSorterFocused() }),
 
 
     // Prevent F7 from triggering Caret Browsing in desktop apps.

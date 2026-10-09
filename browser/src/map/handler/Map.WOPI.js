@@ -18,6 +18,8 @@ window.L.Map.WOPI = window.L.Handler.extend({
 	// So use '*' because we still needs to send 'close' message to the parent frame which
 	// wouldn't be possible otherwise.
 	PostMessageOrigin: window.postmessageOriginExt || '*',
+	// The host origin the relay page has been told so far, empty until the first message.
+	_relayHostOrigin: '',
 	BaseFileName: '',
 	BreadcrumbDocName: '',
 	DocumentLoadedTime: false,
@@ -37,17 +39,21 @@ window.L.Map.WOPI = window.L.Handler.extend({
 	EnableRemoteSlideImport: false,
 	DisableInsertLocalImage: false,
 	EnableInsertRemoteLink: false,
+	EnableRemoteLinkPicker: false,
 	EnableRemoteAIContent: false,
 	DisableAISettings: false,
 	IsAnonymousUser: false,
 	AIConfigured: false,
 	AIModelName: '',
+	AIEthicalRating: 'U',
 	EnableShare: false,
 	HideUserList: null,
 	CallPythonScriptSource: null,
 	SupportsRename: false,
 	UserCanRename: false,
 	UserCanWrite: false,
+	IsOwner: false,
+	UserCanChangeSecurityLabel: true,
 	DisablePresentation: false,
 	PresentationLeader: '',
 
@@ -142,51 +148,68 @@ window.L.Map.WOPI = window.L.Handler.extend({
 			this.PostMessageOrigin = wopiInfo['PostMessageOrigin'];
 		}
 
-		this.BaseFileName = wopiInfo['BaseFileName'];
-		this.BreadcrumbDocName = wopiInfo['BreadcrumbDocName'];
-		if (this.BreadcrumbDocName === undefined)
-			this.BreadcrumbDocName = this.BaseFileName;
+		// A property that the frame does not carry keeps its current value, which before the first
+		// frame is the default above:
+		const has = (key) => Object.prototype.hasOwnProperty.call(wopiInfo, key);
+		if (has('BaseFileName')) this.BaseFileName = wopiInfo['BaseFileName'];
+		if (has('BreadcrumbDocName'))
+			this.BreadcrumbDocName = wopiInfo['BreadcrumbDocName'];
+		else if (has('BaseFileName')) this.BreadcrumbDocName = this.BaseFileName;
 		this._updateDocumentTitle();
-		this.HidePrintOption = !!wopiInfo['HidePrintOption'];
-		this.HideSaveOption = !!wopiInfo['HideSaveOption'];
-		this.HideExportOption = !!wopiInfo['HideExportOption'];
-		this.HideRepairOption = !!wopiInfo['HideRepairOption'];
-		this.HideChangeTrackingControls = !!wopiInfo['HideChangeTrackingControls'];
-		this.DisablePrint = !!wopiInfo['DisablePrint'];
-		this.DisableExport = !!wopiInfo['DisableExport'];
-		this.DisableCopy = !!wopiInfo['DisableCopy'];
-		this.DisableInactiveMessages = !!wopiInfo['DisableInactiveMessages'];
-		this.DownloadAsPostMessage = Object.prototype.hasOwnProperty.call(overridenFileInfo, 'DownloadAsPostMessage') ?
-			overridenFileInfo.DownloadAsPostMessage : !!wopiInfo['DownloadAsPostMessage'];
-		this.UserCanNotWriteRelative = !!wopiInfo['UserCanNotWriteRelative'];
-		this.EnableInsertRemoteImage = !!wopiInfo['EnableInsertRemoteImage'];
-		this.EnableInsertRemoteFile = !!wopiInfo['EnableInsertRemoteFile'];
-		this.EnableRemoteSlideImport = !!wopiInfo['EnableRemoteSlideImport'];
-		this.DisableInsertLocalImage = !!wopiInfo['DisableInsertLocalImage'];
-		this.EnableRemoteLinkPicker = !!wopiInfo['EnableRemoteLinkPicker'];
-		this.EnableRemoteAIContent = !!wopiInfo['EnableRemoteAIContent'];
-		this.DisableAISettings = !!wopiInfo['DisableAISettings'];
-		this.IsAnonymousUser = !!wopiInfo['IsAnonymousUser'];
-		this.AIConfigured = !!wopiInfo['AIConfigured'];
-		this.AIModelName = wopiInfo['AIModelName'] || '';
-		this.AIEthicalRating = wopiInfo['AIEthicalRating'] || 'U';
+		for (const key of [
+			'HidePrintOption',
+			'HideSaveOption',
+			'HideExportOption',
+			'HideRepairOption',
+			'HideChangeTrackingControls',
+			'DisablePrint',
+			'DisableExport',
+			'DisableCopy',
+			'DisableInactiveMessages',
+			'DownloadAsPostMessage',
+			'UserCanNotWriteRelative',
+			'EnableInsertRemoteImage',
+			'EnableInsertRemoteFile',
+			'EnableRemoteSlideImport',
+			'DisableInsertLocalImage',
+			'EnableRemoteLinkPicker',
+			'EnableRemoteAIContent',
+			'DisableAISettings',
+			'IsAnonymousUser',
+			'AIConfigured',
+			'SupportsRename',
+			'UserCanRename',
+			'EnableShare',
+			'UserCanWrite',
+			// Absent keeps the default (true); only an explicit false locks the marking.
+			'UserCanChangeSecurityLabel',
+			'DisablePresentation',
+			'IsOwner',
+		]) {
+			if (has(key)) this[key] = !!wopiInfo[key];
+		}
+		if (
+			Object.prototype.hasOwnProperty.call(
+				overridenFileInfo,
+				'DownloadAsPostMessage',
+			)
+		)
+			this.DownloadAsPostMessage = overridenFileInfo.DownloadAsPostMessage;
+		if (has('AIModelName')) this.AIModelName = wopiInfo['AIModelName'] || '';
+		if (has('AIEthicalRating'))
+			this.AIEthicalRating = wopiInfo['AIEthicalRating'] || 'U';
 		app.serverConnectionService.onWopiProps({
 			AIConfigured: this.AIConfigured,
 			AIModelName: this.AIModelName,
 			AIEthicalRating: this.AIEthicalRating,
 		});
-		this.SupportsRename = !!wopiInfo['SupportsRename'];
-		this.UserCanRename = !!wopiInfo['UserCanRename'];
-		this.EnableShare = !!wopiInfo['EnableShare'];
-		this.UserCanWrite = !!wopiInfo['UserCanWrite'];
-		this.DisablePresentation = !!wopiInfo['DisablePresentation'];
-		this.PresentationLeader = wopiInfo['PresentationLeader'] || '';
-		this.CommentAvatarUrl = wopiInfo['CommentAvatarUrl'];
+		if (has('PresentationLeader'))
+			this.PresentationLeader = wopiInfo['PresentationLeader'] || '';
+		if (has('CommentAvatarUrl'))
+			this.CommentAvatarUrl = wopiInfo['CommentAvatarUrl'];
 
 		if (this.UserCanWrite && !app.isReadOnly()) // There are 2 places that set the file permissions, WOPI and URI. Don't change permission if URI doesn't allow.
 			app.setPermission('edit');
-
-		this.IsOwner = !!wopiInfo['IsOwner'];
 
 		if (wopiInfo['HideUserList'])
 			this.HideUserList = wopiInfo['HideUserList'].split(',');
@@ -357,6 +380,12 @@ window.L.Map.WOPI = window.L.Handler.extend({
 		if (this._cachedGoodOrigin && this._cachedGoodOrigin === e.origin)
 			return true;
 
+		// The relay page is the parent this page talks to, so its messages are accepted.
+		if (window.relayOrigin && e.origin === window.relayOrigin) {
+			this._cachedGoodOrigin = e.origin;
+			return true;
+		}
+
 		try {
 			if (e.origin === window.parent.origin)
 				return true;
@@ -396,8 +425,12 @@ window.L.Map.WOPI = window.L.Handler.extend({
 
 		const eSignature = this._map.eSignature;
 		if (eSignature && eSignature.url === e.origin) {
-			// The sender is our esign popup: accept it.
-			return true;
+			// The sender is our esign popup, which sends only its signing result.
+			return (
+				typeof e.data === 'object' &&
+				e.data !== null &&
+				e.data.sender === 'EIDEASY_SINGLE_METHOD_SIGNATURE'
+			);
 		}
 
 		return false;
@@ -1196,7 +1229,24 @@ window.L.Map.WOPI = window.L.Handler.extend({
 				'SendTime': Date.now(),
 				'Values': values
 			};
-			window.parent.postMessage(JSON.stringify(msg), this.PostMessageOrigin);
+			// With a relay page in between, every message goes to the relay page, and
+			// the relay page posts it on to the WOPI host. The relay page has to name the
+			// origin of the host in that post, so this page sends it a Relay_HostOrigin
+			// message with PostMessageOrigin before the first message, and again each time
+			// PostMessageOrigin changes, as it does when CheckFileInfo sets it.
+			if (window.relayOrigin && this._relayHostOrigin !== this.PostMessageOrigin) {
+				this._relayHostOrigin = this.PostMessageOrigin;
+				const relayMessage = {
+					'MessageId': 'Relay_HostOrigin',
+					'SendTime': Date.now(),
+					'Values': {
+						PostMessageOrigin: this.PostMessageOrigin
+					}
+				};
+				window.parent.postMessage(JSON.stringify(relayMessage), window.relayOrigin);
+			}
+			const targetOrigin = window.relayOrigin ? window.relayOrigin : this.PostMessageOrigin;
+			window.parent.postMessage(JSON.stringify(msg), targetOrigin);
 		}
 	},
 

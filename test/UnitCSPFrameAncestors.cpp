@@ -22,6 +22,7 @@
 #include <Poco/URI.h>
 #include <Poco/Util/LayeredConfiguration.h>
 
+#include <set>
 #include <string>
 
 /// Verifies that a frame-ancestors list in net.content_security_policy is widened, not obeyed
@@ -49,6 +50,7 @@ public:
     void invokeWSDTest() override
     {
         testDocumentPage();
+        testRelayOriginIsTakenFromTheConfiguredList();
         testSettingsPageWithoutIntegrator();
         testSettingsPageWithIntegrator();
         testSettingsPageWithMalformedIntegrator();
@@ -63,9 +65,10 @@ private:
         return Poco::URI(helpers::getTestServerURI()).getHost() + ":*";
     }
 
-    /// The frame-ancestors sources of a response, or the empty string when the response carries
-    /// no such directive.
-    std::string getFrameAncestors(const std::shared_ptr<const http::Response>& response) const
+    /// The sources of a directive in the CSP of a response, or the empty string when the response
+    /// carries no such directive.
+    std::string getDirective(const std::shared_ptr<const http::Response>& response,
+                             const std::string& name) const
     {
         const std::string csp = response->header().get("Content-Security-Policy", std::string());
         TST_LOG("CSP: " << csp);
@@ -74,12 +77,36 @@ private:
         for (std::size_t i = 0; i < directives.size(); ++i)
         {
             const std::string directive = Util::trimmed(directives[i]);
-            constexpr std::string_view name = "frame-ancestors";
-            if (directive.starts_with(name))
+            if (directive.starts_with(name + ' '))
                 return Util::trimmed(directive.substr(name.size()));
         }
 
         return std::string();
+    }
+
+    /// The frame-ancestors sources of a response, or the empty string when the response carries
+    /// no such directive.
+    std::string getFrameAncestors(const std::shared_ptr<const http::Response>& response) const
+    {
+        return getDirective(response, "frame-ancestors");
+    }
+
+    /// The configured frame ancestors reach the policy both through the
+    /// net.content_security_policy merge and through the widened list, and must still be listed
+    /// only once.
+    void assertSourcesListedOnce(const std::string& sources, const std::string& what)
+    {
+        std::set<std::string> seen;
+        const StringVector tokens = StringVector::tokenize(sources, ' ');
+        for (std::size_t i = 0; i < tokens.size(); ++i)
+        {
+            if (tokens[i].empty())
+                continue;
+
+            LOK_ASSERT_MESSAGE("Expected [" + tokens[i] + "] to be listed once in " + what +
+                                   ", which was [" + sources + ']',
+                               seen.insert(tokens[i]).second);
+        }
     }
 
     void assertHasAncestor(const std::string& frameAncestors, const std::string& expected,
@@ -120,6 +147,47 @@ private:
         const std::string frameAncestors = getFrameAncestors(response);
         assertHasAncestor(frameAncestors, kPinnedAncestor, "cool.html");
         assertHasAncestor(frameAncestors, coolwsdAncestor(), "cool.html");
+        assertSourcesListedOnce(frameAncestors, "the frame-ancestors of cool.html");
+        assertSourcesListedOnce(getDirective(response, "img-src"), "the img-src of cool.html");
+        assertSourcesListedOnce(getDirective(response, "frame-src"), "the frame-src of cool.html");
+    }
+
+    /// The document page, requested the way a relay requests it: the form carries the origin of
+    /// the page that would sit between the document page and the WOPI host.
+    std::string getDocumentPageWithRelayOrigin(const std::string& relayOrigin)
+    {
+        http::Request request("/browser/dist/cool.html", http::Request::VERB_POST);
+        request.setBody("relay_origin=" + Uri::encode(relayOrigin),
+                        "application/x-www-form-urlencoded");
+
+        const std::shared_ptr<http::Session> session =
+            http::Session::create(helpers::getTestServerURI());
+        const std::shared_ptr<const http::Response> response =
+            session->syncRequest(request, http::Session::getDefaultTimeout());
+        LOK_ASSERT_EQUAL(http::StatusCode::OK, response->statusLine().statusCode());
+
+        constexpr std::string_view attribute = "data-relay-origin = \"";
+        const std::string& body = response->getBody();
+        const std::size_t start = body.find(attribute);
+        LOK_ASSERT_MESSAGE("The document page must carry a data-relay-origin attribute",
+                           start != std::string::npos);
+
+        const std::size_t valueStart = start + attribute.size();
+        const std::size_t end = body.find('"', valueStart);
+        LOK_ASSERT_MESSAGE("The data-relay-origin attribute must be closed",
+                           end != std::string::npos);
+        return body.substr(valueStart, end - valueStart);
+    }
+
+    /// Only an origin the administrator listed in frame-ancestors is handed to the page as the
+    /// relay, whatever origin the form asks for.
+    void testRelayOriginIsTakenFromTheConfiguredList()
+    {
+        LOK_ASSERT_EQUAL_STR(kPinnedAncestor, getDocumentPageWithRelayOrigin(kPinnedAncestor));
+
+        LOK_ASSERT_EQUAL_STR("", getDocumentPageWithRelayOrigin("https://elsewhere.example"));
+        LOK_ASSERT_EQUAL_STR("", getDocumentPageWithRelayOrigin("pinned.example"));
+        LOK_ASSERT_EQUAL_STR("", getDocumentPageWithRelayOrigin(std::string()));
     }
 
     /// The regression: the settings page used to emit the configured list verbatim, so an
@@ -129,6 +197,7 @@ private:
         const std::string frameAncestors = getFrameAncestors(getSettingsPage(std::string()));
         assertHasAncestor(frameAncestors, kPinnedAncestor, "the settings page");
         assertHasAncestor(frameAncestors, coolwsdAncestor(), "the settings page");
+        assertSourcesListedOnce(frameAncestors, "the frame-ancestors of the settings page");
     }
 
     /// An integrator on a host of its own is allowed to frame its settings page too.
@@ -140,6 +209,7 @@ private:
         assertHasAncestor(frameAncestors, coolwsdAncestor(), "the settings page");
         assertHasAncestor(frameAncestors, std::string(kIntegratorHost) + ":*",
                           "the settings page");
+        assertSourcesListedOnce(frameAncestors, "the frame-ancestors of the settings page");
     }
 
     /// A wopi_setting_base_url that is no URL at all contributes no ancestor, and does not stop

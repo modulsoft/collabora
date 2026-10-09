@@ -26,8 +26,8 @@
  *
  * Expected JSON payload (in data.data): see EditEngineWidgetJSON.
  *
- * Sent back as 'key' { keyCode, charCode, repeat }, 'text' { text } and
- * 'selection' { startPara, startIndex, endPara, endIndex }.
+ * Sent back as 'key' { keyCode, charCode, repeat }, 'text' { text },
+ * 'selection' { startPara, startIndex, endPara, endIndex }, and 'focus' and 'blur' with no data.
  */
 
 declare var JSDialog: any;
@@ -162,6 +162,21 @@ function editEngineApplySelection(
 	);
 }
 
+/// Drops the document selection when it lies in the container.
+function editEngineDropSelection(container: HTMLElement): void {
+	const selection = window.getSelection();
+	if (!selection || selection.rangeCount === 0) return;
+
+	const range = selection.getRangeAt(0);
+	if (
+		!container.contains(range.startContainer) &&
+		!container.contains(range.endContainer)
+	)
+		return;
+
+	selection.removeAllRanges();
+}
+
 function editEngineKey(selection: EditEngineSelection): string {
 	return (
 		selection.startPara +
@@ -210,6 +225,12 @@ function editEngineOnKeyDown(
 
 	// keyCode 229 is what browsers report while an input method owns the keystroke.
 	if (event.isComposing || event.keyCode === 229) return;
+
+	// Let the browser handle clipboard shortcuts for the contenteditable element.
+	if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+		const key = event.key.toLowerCase();
+		if (key === 'x' || key === 'c' || key === 'v') return;
+	}
 
 	event.preventDefault();
 
@@ -262,6 +283,50 @@ function editEngineOnBeforeInput(
 	}
 }
 
+/// Re-fires the .uno:Copy / .uno:Cut state the server last broadcasted.
+function editEngineRestoreClipboardState(container: EditEngineContainer): void {
+	const map = container.builder.map;
+	const handler = map.stateChangeHandler;
+	if (!handler) return;
+	map.fire('commandstatechanged', {
+		commandName: '.uno:Copy',
+		state: handler.getItemValue('.uno:Copy') || '',
+	});
+	map.fire('commandstatechanged', {
+		commandName: '.uno:Cut',
+		state: handler.getItemValue('.uno:Cut') || '',
+	});
+}
+
+/// Watch selection changes on 'container' and fire 'commandstatechanged' accordingly.
+function editEngineUpdateClipboardState(container: EditEngineContainer): void {
+	if (document.activeElement !== container) return;
+
+	// Update the cut/copy buttons based on if a range is selected.
+	const selection = window.getSelection();
+	let hasSelection = false;
+	if (selection && selection.rangeCount > 0) {
+		const range = selection.getRangeAt(0);
+		if (
+			!range.collapsed &&
+			container.contains(range.startContainer) &&
+			container.contains(range.endContainer)
+		)
+			hasSelection = true;
+	}
+	const state = hasSelection ? 'enabled' : 'disabled';
+	container.builder.map.fire('commandstatechanged', {
+		commandName: '.uno:Copy',
+		state: state,
+		uiOnly: true,
+	});
+	container.builder.map.fire('commandstatechanged', {
+		commandName: '.uno:Cut',
+		state: state,
+		uiOnly: true,
+	});
+}
+
 function editEngineAttachHandlers(container: EditEngineContainer): void {
 	container.addEventListener('keydown', (e: KeyboardEvent) =>
 		editEngineOnKeyDown(container, e),
@@ -270,6 +335,17 @@ function editEngineAttachHandlers(container: EditEngineContainer): void {
 	container.addEventListener('beforeinput', (e: Event) =>
 		editEngineOnBeforeInput(container, e as InputEvent),
 	);
+
+	// The engine switches the text in and out of editing on focus changes, for example to clear a
+	// placeholder text on entry and to restore it when the text is left empty.
+	container.addEventListener('focus', () =>
+		editEngineSendAction(container, 'focus', {}),
+	);
+
+	container.addEventListener('blur', () => {
+		editEngineSendAction(container, 'blur', {});
+		editEngineRestoreClipboardState(container);
+	});
 
 	container.addEventListener('compositionend', (e: CompositionEvent) => {
 		if (e.data) editEngineSendAction(container, 'text', { text: e.data });
@@ -295,9 +371,24 @@ function editEngineAttachHandlers(container: EditEngineContainer): void {
 
 	// A pointer gesture is the one caret move the engine cannot know about, so it is reported.
 	// Keyboard caret moves are not: those went to the engine as key events, and the model that
-	// comes back says where the caret ended up.
-	container.addEventListener('mouseup', () =>
-		editEngineSendSelection(container),
+	// comes back says where the caret ended up. The gesture ends at the mouseup wherever it is
+	// released, because a drag that selects text can finish outside the widget. A click inside a
+	// selection collapses it only after the mouseup has been handled, so the selection is read in a
+	// later task.
+	container.addEventListener('mousedown', () =>
+		window.addEventListener(
+			'mouseup',
+			() =>
+				app.layoutingService.appendLayoutingTask(() =>
+					editEngineSendSelection(container),
+				),
+			{ once: true },
+		),
+	);
+
+	// Keep the notebookbar Copy and Cut button states up to date.
+	document.addEventListener('selectionchange', () =>
+		editEngineUpdateClipboardState(container),
 	);
 }
 
@@ -384,6 +475,30 @@ function editEngineRenderParagraph(
 	return element;
 }
 
+/// Names the user of the view that holds the text, in the color that marks that user elsewhere,
+/// or removes the name when no other view holds it.
+function editEngineApplyLock(
+	container: EditEngineContainer,
+	lockedBy: number | undefined,
+): void {
+	if (lockedBy === undefined) {
+		container.removeAttribute('data-locked-by');
+		container.style.removeProperty('--editengine-locked-color');
+		return;
+	}
+
+	const map = container.builder.map as any;
+	const name = map && map.getViewName ? map.getViewName(lockedBy) : null;
+	const notice = name
+		? _('%1 is editing').replace('%1', name)
+		: _('Another user is editing');
+	container.setAttribute('data-locked-by', notice);
+	container.style.setProperty(
+		'--editengine-locked-color',
+		app.LOUtil.rgbToHex(app.LOUtil.getViewIdColor(lockedBy)),
+	);
+}
+
 /// Applies a fresh model to an existing widget without recreating the container. The engine sends
 /// these after the first build, so the contenteditable element that holds focus and the input
 /// method state is kept, and only its paragraphs and caret are replaced.
@@ -392,15 +507,26 @@ function editEngineUpdateInPlace(
 	container: EditEngineContainer,
 	widgetData: EditEngineWidgetJSON,
 ): void {
-	if (widgetData.backgroundColor)
-		container.style.background = widgetData.backgroundColor;
-
+	const wasReadOnly = container.getAttribute('contenteditable') === 'false';
 	const readOnly = widgetData.readOnly === true;
 	container.setAttribute('contenteditable', readOnly ? 'false' : 'true');
+	container.setAttribute('aria-readonly', readOnly ? 'true' : 'false');
+	editEngineApplyLock(container, widgetData.lockedBy);
 	if (!readOnly && !container.editEngineHandlersAttached) {
 		editEngineAttachHandlers(container);
 		container.editEngineHandlersAttached = true;
 	}
+
+	// A widget that kept the focus while it was read-only reports the focus once it can be
+	// edited, which is when the engine lets it in. A window in the background reports it when it
+	// gets the focus back.
+	if (
+		wasReadOnly &&
+		!readOnly &&
+		document.activeElement === container &&
+		document.hasFocus()
+	)
+		editEngineSendAction(container, 'focus', {});
 
 	const paragraphs = (widgetData.paragraphs || []).map(
 		editEngineRenderParagraph,
@@ -408,8 +534,6 @@ function editEngineUpdateInPlace(
 
 	container.replaceChildren(...paragraphs);
 
-	// The engine owns the caret, so its selection is applied as given. The container stays in the
-	// document across the update, so the caret can be placed at once with no wait for a frame.
 	const selection = widgetData.selection || {
 		startPara: 0,
 		startIndex: 0,
@@ -417,7 +541,18 @@ function editEngineUpdateInPlace(
 		endIndex: 0,
 	};
 	container.editEngineLastSelection = editEngineKey(selection);
-	editEngineApplySelection(container, selection);
+
+	// The engine owns the caret, so its selection is applied as given. The container stays in the
+	// document across the update, so the caret can be placed at once with no wait for a frame.
+	if (document.activeElement === container) {
+		editEngineApplySelection(container, selection);
+		return;
+	}
+
+	// Without the focus the widget shows no caret. A document selection that sat in the replaced
+	// paragraphs now rests on the container itself, and WebKit draws a caret for a selection in
+	// editable content whether or not that content has the focus, so the selection is dropped.
+	editEngineDropSelection(container);
 }
 
 function _editEngineControl(
@@ -441,14 +576,13 @@ function _editEngineControl(
 	container.setAttribute('autocorrect', 'off');
 	container.tabIndex = 0;
 
-	if (widgetData.backgroundColor)
-		container.style.background = widgetData.backgroundColor;
-
 	for (const paragraph of widgetData.paragraphs || [])
 		container.appendChild(editEngineRenderParagraph(paragraph));
 
 	const readOnly = widgetData.readOnly === true;
 	container.setAttribute('contenteditable', readOnly ? 'false' : 'true');
+	container.setAttribute('aria-readonly', readOnly ? 'true' : 'false');
+	editEngineApplyLock(container, widgetData.lockedBy);
 	if (!readOnly) {
 		editEngineAttachHandlers(container);
 		container.editEngineHandlersAttached = true;

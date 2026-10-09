@@ -34,6 +34,7 @@ interface MapInterface extends Evented {
 	_textInput: {
 		debug(value: boolean): void;
 		_isDebugOn: boolean;
+		onVisibleAreaChanged?(): void;
 		update(): void;
 	};
 	addressInputField: AddressInputField;
@@ -77,7 +78,6 @@ interface MapInterface extends Evented {
 			no_auth_header?: string;
 			permission?: 'edit' | 'readonly' | 'view';
 		};
-		renderingOptions: string;
 		tileWidthTwips: number;
 		tileHeightTwips: number;
 		wopiSrc: string;
@@ -250,6 +250,7 @@ interface MapInterface extends Evented {
 	hideSlide(): void;
 	showSlide(): void;
 	sidebarFromNotebookbar: SidebarFromNotebookbarPanel;
+	cleanupSidebar: CleanupSidebar;
 	mobileTopBar?: MobileTopBar;
 
 	// TODO: window.L.control.lokDialog

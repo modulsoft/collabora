@@ -17,14 +17,16 @@
 #pragma once
 
 #include <common/Authorization.hpp>
+#include <common/Common.hpp>
 #include <common/Log.hpp>
 #include <common/Protocol.hpp>
+#include <common/Rectangle.hpp>
 #include <common/Session.hpp>
 #include <common/SigUtil.hpp>
 #include <common/Util.hpp>
 #include <net/Socket.hpp>
 #include <wsd/QuarantineUtil.hpp>
-#include <wsd/RelatedDocuments.hpp>
+#include <wsd/RemoteLinks.hpp>
 #include <wsd/ServerAuditUtil.hpp>
 #include <wsd/SlideCache.hpp>
 #include <wsd/Storage.hpp>
@@ -307,6 +309,51 @@ public:
     /// Read and written from the app's own thread as well as the polling thread.
     void setDetached(bool detached) { _detached = detached; }
 
+    /// Where a view was looking when it went away. An empty part, a zoom of zero and an
+    /// empty visible area each mean that value was never recorded.
+    struct ViewPosition
+    {
+        /// The identifier of the part, as the protocol spells it.
+        std::string part;
+        int zoomPercent = 0;
+        /// True when the view was in editing mode rather than viewing mode.
+        bool editMode = false;
+        /// The area the client had in view, in document twips.
+        Util::Rectangle visibleArea;
+        /// Where the text cursor was, in document twips.
+        Util::Rectangle cursor;
+        /// The two ends of the text selection, in document twips.
+        Util::Rectangle selectionStart;
+        Util::Rectangle selectionEnd;
+        /// The cell the cursor was on, such as "D24". Empty in a document with no cells.
+        std::string cellAddress;
+
+        bool hasPart() const { return !part.empty(); }
+        bool hasZoom() const { return zoomPercent > 0; }
+        bool hasVisibleArea() const { return visibleArea.hasSurface(); }
+        bool hasCursor() const { return cursor.isValid() && cursor.getHeight() > 0; }
+        bool hasSelection() const
+        {
+            return selectionStart.isValid() && selectionEnd.isValid() &&
+                   selectionStart.getHeight() > 0 && selectionEnd.getHeight() > 0;
+        }
+        bool hasCellAddress() const { return !cellAddress.empty(); }
+    };
+
+    /// What the last view of this document was looking at, kept for the view that opens
+    /// next. Empty until a view departs from a document that is staying loaded.
+    const ViewPosition& getLastViewPosition() const { return _lastViewPosition; }
+
+    /// Keep where this session was looking, so the next view of the document opens there.
+    /// A value the session never reported keeps what the session before it reported.
+    void rememberViewPosition(const ClientSession& session);
+
+#if APP_HAS_SETTINGS_STORE
+    /// Reads the user's own configuration and asks this document's kit to apply it.
+    /// Returns whether there was any. Runs on the polling thread.
+    bool installUserPresets();
+#endif
+
     virtual ~DocumentBroker();
 
     /// Called when removed from the DocBrokers list
@@ -462,45 +509,46 @@ public:
     bool isKnownAccessToken(const std::string& accessToken) const;
 
 #if !MOBILEAPP
-    /// Records the public part of a related document, the same for every view
+    /// Records the public part of a remote link, the same for every view
     void setRemoteDocumentSource(const std::string& wopiSrc, const std::string& name,
-                                 const std::string& lastModifiedTime);
+                                 const std::string& lastModifiedTime,
+                                 const std::string& persistentLink);
 
     /// Records the source documents this document's own content names, the whole of what it
-    /// names, so that a source the storage listed no related document for is still reported.
+    /// names, so that a source the storage listed no remote link for is still reported.
     void setRemoteDocumentNamedSources(std::vector<std::string> names);
 
-    /// Records the access token one view holds for a related document. Private.
+    /// Records the access token one view holds for a remote link. Private.
     void setRemoteDocumentViewToken(const std::string& tag, const std::string& wopiSrc,
                                     const std::string& accessToken);
 
-    /// Records a related document and gives its access token to the view that
-    /// holds the given one-time token, coming from POST /cool/relateddocument.
-    /// Consumes and rotates that view's token. Returns false when no view holds
-    /// the token, so the request is refused and nothing is recorded.
+    /// Records that one view's storage answers link access requests and asks it for the
+    /// sources this document names that no remote link stands for. Private to that view.
+    void enableRemoteDocumentLinkAccess(const std::string& tag);
+
+    /// Takes the storage's answer to one view's link access request for one source.
+    void completeRemoteDocumentLinkAccess(const std::string& tag, const std::string& persistentLink,
+                                          unsigned statusCode, const std::string& body);
+
+    /// Asks one view's storage again for the document behind one source this document names.
+    void resolveRemoteDocumentSource(const std::string& tag, const std::string& persistentLink);
+
+    /// Records a remote link and gives its access token to the view that
+    /// holds the given one-time token, coming from POST /cool/links.
     bool registerRemoteDocumentToken(const std::string& oneTimeToken, const std::string& wopiSrc,
                                      const std::string& accessToken, const std::string& name,
-                                     const std::string& lastModifiedTime);
+                                     const std::string& lastModifiedTime,
+                                     const std::string& persistentLink);
 
-    /// What a request to drop a related document came to.
-    enum class RelatedDocumentRemoval
-    {
-        BadToken, ///< No view of this document holds that one-time token, so nothing was done.
-        NotFound, ///< The token was accepted and no related document is recorded at that address.
-        Removed, ///< The related document is gone.
-    };
+    /// Drops the remote link bound to the given persistent link, at the request of a view. The
+    /// link is dropped for every view, since the list of remote links is the same for all of
+    /// them. Reports whether one was bound to it.
+    bool removeRemoteDocumentSource(const std::string& persistentLink);
 
-    /// Drops the related document at the given WOPISrc for the view that holds the given
-    /// one-time token, coming from DELETE /cool/relateddocument. The document is dropped for
-    /// every view, since the list of related documents is the same for all of them. A token
-    /// that is a view's own is consumed and rotated, whether a document was dropped or not.
-    RelatedDocumentRemoval removeRemoteDocumentSource(const std::string& oneTimeToken,
-                                                      const std::string& wopiSrc);
-
-    /// Opens or drops one view's subscription to a remote document. The view
-    /// is named by its tag.
+    /// Opens or drops one view's subscription to the remote document bound to the given
+    /// persistent link. The view is named by its tag.
     void handleRemoteDocumentSubscribe(const std::string& tag,
-                                       const std::string& encodedWopiSrc, bool subscribe);
+                                       const std::string& persistentLink, bool subscribe);
 
     /// Returns the live session with the given id, or null when there is none.
     std::shared_ptr<ClientSession> findSession(const std::string& id) const;
@@ -509,7 +557,7 @@ public:
     /// not accepted. The view is named by its tag.
     void removeRemoteSubscription(const std::string& tag, const std::string& wopiSrc);
 
-    /// Drops everything one view held for related documents when it leaves.
+    /// Drops everything one view held for remote links when it leaves.
     void removeRemoteDocumentView(const std::string& tag);
 
     /// Handles a remote document event addressed to one view, named by its
@@ -518,9 +566,9 @@ public:
     void sendRemoteDocumentEvent(const std::string& tag, const std::string& encodedWopiSrc,
                                  const std::string& eventArguments);
 
-    /// Routes a read-only client command from one view to the remote document
-    /// with the given WOPISrc. The view is named by its tag.
-    void sendRemoteDocumentCommand(const std::string& tag, const std::string& wopiSrc,
+    /// Routes a read-only client command from one view to the remote document bound to the
+    /// given persistent link. The view is named by its tag.
+    void sendRemoteDocumentCommand(const std::string& tag, const std::string& persistentLink,
                                    const std::string& command);
 
     /// Delivers a wrapped remote document reply to the view that asked for it,
@@ -767,12 +815,28 @@ public:
     // time since construction
     void timeoutNotLoaded(std::chrono::steady_clock::time_point now);
 
+    /// Tells every session whether a document settings change it makes now would
+    /// be felt in this document. It depends on who else is here, so it is sent
+    /// again as people come and go.
+    void sendDocumentSettingsLive();
+
+    bool isDocumentSettingsLive(const std::shared_ptr<ClientSession>& session) const;
+
 #if !MOBILEAPP
+    /// Reads this user's settings into the jail again and has the kit apply them,
+    /// so a change made in the dialog takes hold without reopening the document.
+    /// Only while they are the one session: see the body.
+    void reinstallUserPresets(const std::shared_ptr<ClientSession>& session);
+
+    /// Fetches this user's configuration from the host into the jail and asks
+    /// the kit to read it. With onlyWhileAlone the result is dropped unless the
+    /// document still has the one session it had when the fetch began.
     void asyncInstallPresets(const std::shared_ptr<ClientSession>& session,
                              const std::string& configId,
                              const std::string& userSettingsUri,
                              const std::string& presetsPath,
-                             std::map<std::string, std::string> groupOverridePath);
+                             std::map<std::string, std::string> groupOverridePath,
+                             bool onlyWhileAlone = false);
 
     static void getBrowserSettingSync(const std::shared_ptr<ClientSession>& session,
                                       const std::string& userSettingsUri);
@@ -879,9 +943,13 @@ private:
     void lockIfEditing(const std::shared_ptr<ClientSession>& session);
 
     /// Updates the document's lock in storage to either locked or unlocked.
+    /// @timeout overrides the default connection timeout; zero to use it.
     /// Returns true iff the operation was successful.
     bool updateStorageLockState(ClientSession& session, StorageBase::LockState lock,
-                                std::string& error);
+                                std::string& error,
+                                std::chrono::seconds timeout = std::chrono::seconds::zero(),
+                                SocketPoll* poller = nullptr,
+                                StorageBase::LockUpdateResult::Status* status = nullptr);
 
     /// Updates the document's lock in storage asynchronously to either locked or unlocked.
     /// Returns false if an error prevented issuing the asynchronous request.
@@ -902,6 +970,7 @@ private:
     void handleTileResponse(const std::shared_ptr<Message>& message);
     void handleDialogPaintResponse(const std::vector<char>& payload, bool child);
     void handleTileCombinedResponse(const std::shared_ptr<Message>& message);
+    void handleTileGoneResponse(const std::shared_ptr<Message>& message);
     void handleSlideLayerResponse(const std::shared_ptr<Message>& message);
 
     /// Gives the views that waited for a finished slide rendering what the kit produced for
@@ -1974,9 +2043,9 @@ private:
     std::map<std::string, std::string> _registeredDownloadLinks;
 
 #if !MOBILEAPP
-    /// The related documents this document may subscribe to, with their
+    /// The remote links this document may subscribe to, with their
     /// subscriptions and the client-facing view of them.
-    RelatedDocuments _relatedDocuments;
+    RemoteLinks _remoteLinks;
 #endif
 
     /// Embedded media map [id, json].
@@ -2020,6 +2089,8 @@ private:
     // configId for the user-level preset stream; empty when no integrator userSettingsUri is in
     // play:
     std::string _userConfigId;
+    /// Where this document's configuration was read from, so it can be read again.
+    std::string _userSettingsUri;
 
     std::shared_ptr<ChildProcess> _childProcess;
 
@@ -2105,6 +2176,9 @@ private:
     /// its own thread before it drops the last view, so it is read atomically.
     std::atomic<bool> _detached;
 
+    /// Where the last view to leave this document was looking.
+    ViewPosition _lastViewPosition;
+
     ChildType _type;
 
     /// The main state of the document.
@@ -2125,9 +2199,22 @@ private:
     /// may have landed and we have to work out which version storage holds.
     bool _lastUploadDefinitelyFailed;
 
+    /// True while the upload in flight, or the last one, uses an access token that has expired or
+    /// that the host has rejected.
+    bool _lastResortUpload;
+
+    /// True when the last upload used an expired or rejected access token and failed.
+    bool _lastResortUploadFailed;
+
     /// Base64 SHA-256 of the bytes of our last upload, taken only when its fate
     /// is unknown and we may have to recognise them in storage. Empty otherwise.
     std::string _lastUploadedFileHash;
+
+    /// Earliest time at which we may ask storage what it holds after an upload
+    /// failure. Set ahead of now only when the upload got no response, to give
+    /// a host that is still writing our bytes time to finish. Default-constructed
+    /// (the clock's epoch) when there is nothing to wait for.
+    std::chrono::steady_clock::time_point _checkFileInfoNotBefore;
 
     /// True for file that COOLWSD::IsViewFileExtension return true.
     /// These files, such as PDF, don't have a reliable ModifiedStatus.
@@ -2158,6 +2245,11 @@ std::shared_ptr<DocumentBroker> findBrokerByMobileAppDocId(unsigned mobileAppDoc
 /// End a document that was left loaded with no views of its own. Does nothing when the
 /// document is not in that state, because closing its last session ends it instead.
 void closeDetachedDocument(unsigned mobileAppDocId);
+
+/// Stores one settings file the Options dialog has uploaded, and, when the engine is the
+/// one that reads it, applies it to every open document, so a setting saved now takes
+/// effect without reopening them. Called from the app's own thread.
+void uploadAndApplySettings(const std::string& payload);
 #endif
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */

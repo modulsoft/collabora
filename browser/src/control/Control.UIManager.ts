@@ -51,6 +51,10 @@ class UIManager extends window.L.Control {
 	// Hidden Notebookbar tabs.
 	hiddenTabs: { [key: string]: boolean } = {};
 	permissionViewMode?: PermissionViewMode;
+	// The load and the AI configuration reply race to reach
+	// initializeAIAssistant(); these let the later one act, once.
+	private documentReadyForAI = false;
+	private aiInitialStateApplied = false;
 	// Guards the one-time reconciliation of an integrator-forced theme with
 	// the server-stored user setting (see reconcileIntegratorThemeOverride).
 	private integratorThemeReconciled = false;
@@ -72,38 +76,39 @@ class UIManager extends window.L.Control {
 	onAdd(map: any) {
 		this.map = map;
 		this.notebookbar = null;
-		// Every time the UI mode changes from 'classic' to 'notebookbar'
-		// the two below elements will be destroyed.
-		// Here we save the original state of the elements, as provided
-		// by server, in order to apply to them the same initialization
-		// code when activating the 'classic' mode as if the elements are
-		// initialized for the first time since the start of the application.
-		// It is important to use the same initial structure provided by server
-		// in order to keep a single place (server) of initial properties setting.
-		this.map.toolbarUpTemplate = $('#toolbar-up')[0].cloneNode(true);
-		this.map.mainMenuTemplate = $('#main-menu')[0].cloneNode(true);
+		if (!window.mode.isInteractivePreview()) {
+			// Every time the UI mode changes from 'classic' to 'notebookbar'
+			// the two below elements will be destroyed.
+			// Here we save the original state of the elements, as provided
+			// by server, in order to apply to them the same initialization
+			// code when activating the 'classic' mode as if the elements are
+			// initialized for the first time since the start of the application.
+			// It is important to use the same initial structure provided by server
+			// in order to keep a single place (server) of initial properties setting.
+			this.map.toolbarUpTemplate = $('#toolbar-up')[0].cloneNode(true);
+			this.map.mainMenuTemplate = $('#main-menu')[0].cloneNode(true);
 
-		map.on('infobar', this.showInfoBar, this);
-		map.on('legacyunoapinotice', this.showLegacyUnoApiSnackbarOnce, this);
-		map.on('docloaded', this._onDocLoadedForLegacyUnoApiSnackbar, this);
-		app.events.on('updatepermission', this.onUpdatePermission.bind(this));
+			map.on('infobar', this.showInfoBar, this);
+			map.on('legacyunoapinotice', this.showLegacyUnoApiSnackbarOnce, this);
+			map.on('docloaded', this._onDocLoadedForLegacyUnoApiSnackbar, this);
+			app.events.on('updatepermission', this.onUpdatePermission.bind(this));
 
-		if (window.mode.isSmallScreenDevice()) {
-			window.addEventListener('popstate', this.onGoBack.bind(this));
+			if (window.mode.isSmallScreenDevice()) {
+				window.addEventListener('popstate', this.onGoBack.bind(this));
 
-			// provide entries in the history we can catch to close the app
-			history.pushState({context: 'app-started'}, 'app-started');
-			history.pushState({context: 'app-started'}, 'app-started');
-		}
+				// provide entries in the history we can catch to close the app
+				history.pushState({context: 'app-started'}, 'app-started');
+				history.pushState({context: 'app-started'}, 'app-started');
+			}
 
-		map.on('blockUI', this.blockUI, this);
-		map.on('unblockUI', this.unblockUI, this);
+			map.on('blockUI', this.blockUI, this);
+			map.on('unblockUI', this.unblockUI, this);
 
-		$('#toolbar-wrapper').on('click', (event) => {
-			const target = event.target as HTMLElement;
-			if (target.parentElement?.id === 'toolbar-up') // checks if clicked on empty part of the toolbar on tabbed view
-				this.map.fire('editorgotfocus');
-		});
+			$('#toolbar-wrapper').on('click', (event) => {
+				const target = event.target as HTMLElement;
+				if (target.parentElement?.id === 'toolbar-up') // checks if clicked on empty part of the toolbar on tabbed view
+					this.map.fire('editorgotfocus');
+			});
 
 		$('.main-nav').on('click', (event) => {
 			const target = event.target as HTMLElement;
@@ -125,7 +130,10 @@ class UIManager extends window.L.Control {
 
 			// Prevent vertical scroll only within this element
 			e.preventDefault();
-		  }, { passive: false });
+		}, { passive: false });
+		} else {
+			$('.main-nav').hide();
+		}
 		this.map.on('updateviewslist', this.onUpdateViews, this);
 
 		this.map['stateChangeHandler'].setItemValue('toggledarktheme', 'false');
@@ -523,7 +531,7 @@ class UIManager extends window.L.Control {
 	 * Returns true when it reconciled (and therefore already applied the theme).
 	 */
 	reconcileIntegratorThemeOverride(): boolean {
-		if (this.integratorThemeReconciled || (window as any).savedUIState)
+		if (this.integratorThemeReconciled || window.savedUIState)
 			return false;
 
 		const prefs = window.prefs as any;
@@ -671,6 +679,9 @@ class UIManager extends window.L.Control {
 	 * Setup menubar and the top toolbar.
 	 */
 	initializeMenubarAndTopToolbar(): void {
+		if (window.mode.isInteractivePreview()) {
+			return;
+		}
 		const enableNotebookbar = this.shouldUseNotebookbarMode();
 		const isSmallScreenDevice = window.mode.isSmallScreenDevice();
 		if (isSmallScreenDevice || !enableNotebookbar) {
@@ -705,7 +716,7 @@ class UIManager extends window.L.Control {
 			});
 		}
 
-		if (!window.mode.isSmallScreenDevice()) {
+		if (!window.mode.isSmallScreenDevice() && !window.mode.isInteractivePreview()) {
 			this.map.statusBar = JSDialog.StatusBar(this.map);
 
 			this.map.sidebar = JSDialog.Sidebar(this.map);
@@ -728,7 +739,7 @@ class UIManager extends window.L.Control {
 
 		window.setupToolbar(this.map);
 
-		if (!(window.mode.isCODesktop())) {
+		if (!window.mode.isCODesktop() && !window.mode.isInteractivePreview()) {
 			this.documentNameInput = window.L.control.documentNameInput();
 			this.map.addControl(this.documentNameInput);
 		}
@@ -741,9 +752,11 @@ class UIManager extends window.L.Control {
 		this.map.dialog = window.L.control.lokDialog();
 		this.map.addControl(this.map.dialog);
 		this.map.addControl(new ContextMenuControl());
-		this.map.userList = window.L.control.userList();
-		this.map.addControl(this.map.userList);
-		this.map.aboutDialog = JSDialog.aboutDialog(this.map);
+		if (!window.mode.isInteractivePreview()) {
+			this.map.userList = window.L.control.userList();
+			this.map.addControl(this.map.userList);
+			this.map.aboutDialog = JSDialog.aboutDialog(this.map);
+		}
 
 		if (window.L.Map.versionBar && window.allowUpdateNotification)
 			this.map.addControl(window.L.Map.versionBar);
@@ -837,6 +850,10 @@ class UIManager extends window.L.Control {
 	 */
 	initializeSpecializedUI(docType: string): void {
 		app.console.debug('UIManager: initialize specialized UI for: ' + docType);
+		if (window.mode.isInteractivePreview()) {
+			this.disableComments();
+			return;
+		}
 
 		const startWelcomePresentation = window.coolParams.get('welcome');
 
@@ -973,6 +990,7 @@ class UIManager extends window.L.Control {
 		if (this.map.isPresentationOrDrawing() && (isDesktop || window.mode.isTablet())) {
 			JSDialog.PresentationBar(this.map);
 			this.map.sidebarFromNotebookbar = JSDialog.SidebarFromNotebookbarPanel(this.map);
+			this.map.cleanupSidebar = JSDialog.CleanupSidebar(this.map);
 		}
 		if (window.mode.isTablet() || window.mode.isDesktop()) {
 			this.map.navigator.initializeNavigator(docType);
@@ -1106,8 +1124,10 @@ class UIManager extends window.L.Control {
 	 * Initializes the sidebar based on saved state and preferences.
 	 */
 	initializeSidebar(): void {
+		this.documentReadyForAI = true;
+
 		// Hide the sidebar on start if saved state or UIDefault is set.
-		if (window.mode.isDesktop()) {
+		if (window.mode.isDesktop() && !window.mode.isInteractivePreview()) {
 			var showSidebar = this.getBooleanDocTypePref('ShowSidebar', true);
 
 			if (showSidebar && this.getBooleanDocTypePref('PropertyDeck', true)) {
@@ -1150,6 +1170,80 @@ class UIManager extends window.L.Control {
 			// Chromebooks early
 			app.socket.sendMessage('uno .uno:SidebarHide');
 		}
+
+		this.initializeAIAssistant();
+	}
+
+	/**
+	 * coolwsd.xml's ai.show_ai_sidebar answers for the instance, the
+	 * integrator's TextAISidebar ui_default for one user's document.
+	 * Read directly, as prefs.get() would also consult browsersetting.json
+	 * and localStorage, and this is deliberately never stored.
+	 */
+	shouldShowAISidebar(): boolean {
+		const prefs = window.prefs as any;
+		const uiDefault = prefs._getUIDefault(
+			this.map.getDocType() + '.ShowAISidebar',
+		);
+
+		return uiDefault !== undefined ? uiDefault === 'true' : window.showAISidebar;
+	}
+
+	/**
+	 * Whether the notebookbar opens on the AI Assistant tab:
+	 * ai.show_ai_notebookbar for the instance, the TextAINotebookbar
+	 * ui_default for one document. Read directly, as above.
+	 */
+	shouldSelectAIAssistantTab(): boolean {
+		const prefs = window.prefs as any;
+		const uiDefault = prefs._getUIDefault(
+			this.map.getDocType() + '.ShowAINotebookbar',
+		);
+
+		return uiDefault !== undefined
+			? uiDefault === 'true'
+			: window.showAINotebookbar;
+	}
+
+	/// A click on the already-selected tab of an expanded notebookbar
+	/// collapses it, so click only when it switches or re-expands.
+	selectAIAssistantTab(): void {
+		const tab = document.getElementById('AIAssistant-tab-label');
+		if (!tab || !this.isTabVisible('AIAssistant')) return;
+		if (!tab.classList.contains('selected') || this.isNotebookbarCollapsed())
+			tab.click();
+	}
+
+	/// Opens the AI Assistant on load where it was asked for. Called from
+	/// both the document load and the AI configuration reply, in either order.
+	initializeAIAssistant(): void {
+		if (this.aiInitialStateApplied || !this.documentReadyForAI) return;
+		if (!this.map.isAIConfigured) return;
+		// Every way into the AI Assistant is a notebookbar button, so it is a
+		// desktop feature and there is nothing to open elsewhere.
+		if (!window.mode.isDesktop()) return;
+
+		this.aiInitialStateApplied = true;
+		this.notebookbar?.impl?.refresh();
+
+		if (!this.shouldShowAISidebar()) return;
+
+		const sidebar = JSDialog.getAIChatSidebar();
+		if (sidebar.isVisible()) return;
+
+		// The two dock side by side, so the sidebar gives up the edge. Hiding
+		// the engine's deck is not enough on its own: CanvasTileLayer shows
+		// the wrapper client-side, which would be left behind empty.
+		// closeSidebar records ShowSidebar=false on the way, so put the stored
+		// value back rather than rewrite the user's own preference.
+		app.socket.sendMessage('uno .uno:SidebarHide');
+		if (this.map.sidebar) {
+			const stored = this.getBooleanDocTypePref('ShowSidebar', true);
+			this.map.sidebar.closeSidebar();
+			this.setDocTypePref('ShowSidebar', stored);
+		}
+
+		sidebar.show();
 	}
 
 	/**
@@ -1170,6 +1264,14 @@ class UIManager extends window.L.Control {
 			this.map['stateChangeHandler'].setItemValue('showruler', rulerState);
 			this._map.fire('commandstatechanged', {commandName : 'showruler', state : rulerState});
 		}
+	}
+
+	/**
+	 * Disable comments for good.
+	 */
+	disableComments(): void {
+		this.map['stateChangeHandler'].setItemValue('showannotations', 'false');
+		this._map.fire('commandstatechanged', {commandName : 'showannotations', state : 'false'});
 	}
 
 	initializeComments(): void {
@@ -1828,7 +1930,7 @@ class UIManager extends window.L.Control {
 
 	initializeNotebookbarInCore(): void {
 		// do it always apart of mobile as we need it for contextual toolbar
-		if (window.mode.isSmallScreenDevice()) return;
+		if (window.mode.isSmallScreenDevice() || window.mode.isInteractivePreview()) return;
 
 		if (!this.notebookbar.impl.initialized) {
 			this.map.sendUnoCommand('.uno:ToolbarMode?Mode:string=Default');
@@ -2713,6 +2815,8 @@ class UIManager extends window.L.Control {
 	/// defaultValue - default value of an input
 	/// buttonText - text inside OK button
 	/// callback - callback on button press
+	/// passwordInput - the input hides the typed characters
+	/// cancelCallback - runs when the dialog is dismissed
 	showInputModal(
 		id: string,
 		title: string,
@@ -2721,6 +2825,7 @@ class UIManager extends window.L.Control {
 		buttonText: string,
 		callback: (input: string) => void,
 		passwordInput?: boolean,
+		cancelCallback?: () => void,
 	): void {
 		var dialogId = this.generateModalId(id);
 		var json = this._modalDialogJSON(id, title, !window.mode.isDesktop(), [
@@ -2760,7 +2865,7 @@ class UIManager extends window.L.Control {
 			},
 		], 'input-modal-input');
 
-		this.showModal(json, [
+		var callbacks: any[] = [
 			{id: 'response-ok', func: () => {
 				if (typeof callback === 'function') {
 					var input = document.getElementById('input-modal-input') as HTMLInputElement;
@@ -2768,7 +2873,14 @@ class UIManager extends window.L.Control {
 				}
 				this.closeModal(dialogId);
 			}}
-		]);
+		];
+
+		if (typeof cancelCallback === 'function') {
+			callbacks.push({id: 'response-cancel', func: cancelCallback});
+			callbacks.push({id: '__POPOVER__', func: cancelCallback});
+		}
+
+		this.showModal(json, callbacks);
 	}
 
 	/**

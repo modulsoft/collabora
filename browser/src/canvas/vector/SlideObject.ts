@@ -15,15 +15,49 @@ namespace cool {
 		/// Stable identity of the object: the engine's SdrObject unique
 		/// id, unchanged across edits to the same object.
 		id?: number;
+		/// The aids that mark out a placeholder: a dashed boundary around
+		/// the area it occupies and, on a master page, the name of the
+		/// area. They are drawn apart from the object's own content.
+		aids?: Primitive[];
+		/// "page" for the entry that stands for the slide itself: it is
+		/// drawn first and holds the background, the page fill and the
+		/// master page content, and its box is the slide.
+		/// "texteditoverlay" for an entry that carries the text of a
+		/// running text edit: it is drawn last, over the object it runs
+		/// on, which hides its own text while the edit runs. There is one
+		/// per view that is editing, and two of them can name the same
+		/// object. Absent for a drawing object.
+		kind?: 'page' | 'texteditoverlay';
+		/// Which view's text edit an entry of kind "texteditoverlay"
+		/// carries, so a reader can tell its own from another user's.
+		viewId?: number;
 		/// Id of the group the object sits in, 0 for an object directly
-		/// on the slide. A group's members follow it in the object list
-		/// and draw its content, so a group with members has no
-		/// primitives of its own.
+		/// on the slide and -1 on the entry of kind "page", which sits
+		/// under nothing, so a walk up the parents ends there. A group's
+		/// members follow it in the object list and draw its content, so
+		/// a group with members has no primitives of its own.
 		parent?: number;
 		/// Id of the layer the object is on.
 		layer?: number;
 		/// True for a placeholder that holds no content of its own yet.
 		emptyPlaceholder?: boolean;
+		/// On the entry of kind "page" of a slide: the index of the master
+		/// part the slide draws under itself. Absent when the page carries
+		/// its master content inline.
+		masterPart?: number;
+		/// On an object of a slide: it is the slide's own copy of a master
+		/// placeholder, rendered for this slide.
+		masterContent?: boolean;
+		/// On a master object: it is a layout prototype, or an empty
+		/// placeholder with neither fill nor line.
+		hiddenBehindSlide?: boolean;
+		/// On a master object: its content differs per slide. Each slide
+		/// carries its own copy of it, under this object's id.
+		slideDependent?: boolean;
+		/// True while a text edit is running on the object. It shows none of
+		/// its own text then, and the entry of kind "texteditoverlay"
+		/// carries what has been typed.
+		textEdit?: boolean;
 		/// Rectangle the object paints, in twips: the primitives' range,
 		/// so it takes in the line width and a shadow.
 		x?: number;

@@ -31,7 +31,7 @@
 	--color-background-lighter: #262626; /* hover, toolbar, dialog, disabled */
 	--color-overlay: #1c5fa814;
 	--color-background-tabs-group: #303030;
-	--color-stylesview-background: var(--color-background-lighter);
+	--color-stylesview-background: #fff;
 	--brightness-stylesview: 0.9;
 
 	--color-canvas: #141414;
@@ -100,6 +100,7 @@
 	/* --opacity-icon-hover: 1; */
 	/* --opacity-icon-active: 1; */
 	--opacity-icon-disabled: 0.65;
+	--opacity-icon-disabled-light: 0.35;
 	--opacity-text-disabled: 0.8; /* a label has to stay readable while it is dimmed */
 }
 

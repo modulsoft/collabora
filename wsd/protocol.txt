@@ -91,29 +91,53 @@ downloadas name=<fileName> id=<id> format=<document format> options=<SkipImages,
     * 'slideshow': When request for download is for showing slideshow
     * 'export': Just a simple download
 
-remotedocsubscribe wopisrc=<encoded-WOPISrc>
-remotedocunsubscribe wopisrc=<encoded-WOPISrc>
+remotedocsubscribe source=<encoded persistent link>
+remotedocunsubscribe source=<encoded persistent link>
 
     Subscribes the sending view to, or unsubscribes it from, live events
-    about the given remote document. The subscription belongs to that one
-    view and is opened with that view's own access token for the remote
-    document; the token comes from that view's UserPrivateInfo in
-    CheckFileInfo, or from a POST to /cool/relateddocument. A view without a
-    token for the source is refused. A DELETE to that address drops the
-    document for every view, and the subscriptions to it go down with it. A view holds at most one subscription
-    per source. The command is handled inside wsd and never given to this
-    document's kit. Requires the remote_documents feature to be enabled.
+    about the remote document bound to the given persistent link. A view
+    names a remote document by its persistent link alone, and the address
+    the server reaches it at stays with the server. The subscription
+    belongs to that one view and is opened with that view's own access
+    token for the remote document; the token comes from that view's
+    UserPrivateInfo in CheckFileInfo, or from a POST to /cool/links. A view
+    without a token for the source is refused, and so is a persistent link
+    no remote link is bound to. A remotelinkremove of the persistent link
+    drops the document for every view, and the subscriptions to it go down
+    with it. A view holds at most one subscription per source. The command
+    is handled inside wsd and never given to this document's kit. Requires
+    the remote_links feature to be enabled.
 
-remotedoccommand wopisrc=<encoded-WOPISrc> <inner client command>
+remotelinkresolve source=<encoded persistent link>
+
+    Asks this view's storage for the document behind one of the persistent
+    links the open document's pages record, over a POST to
+    <WOPISrc>/linkaccess. A view asks for the sources it finds on the
+    document once, when it joins; afterwards, and for the sources later
+    editing names, this command is the only thing that asks, so a user who
+    sees a source reported as missing can have it looked for again.
+    Requires the remote_links feature and SupportsLinkAccess.
+
+remotelinkremove source=<encoded persistent link>
+
+    Drops the remote link bound to the given persistent link from the list
+    of this document, for every view. The subscriptions to it go down with
+    it, and the fresh list goes out to all views. The link is named by its
+    persistent link, the value the document's pages store, and not by the
+    address the storage resolved it to. Answered with an error of kind
+    'notfound' when no remote link is bound to it. Requires the remote_links
+    feature to be enabled.
+
+remotedoccommand source=<encoded persistent link> <inner client command>
 
     Routes a read-only client command to the remote document the current
-    document is subscribed to, named by its WOPISrc. The inner command is an
+    document is subscribed to, bound to the given persistent link. The inner command is an
     ordinary client command line, for example "getslidesections" or
     "tilecombine ...". The command is handled inside wsd and sent to the
     remote over the headless session; it is never given to this document's
     kit. Only non-modifying commands are accepted. The remote's replies come
     back as remotedoccommandresult: messages. Requires a live subscription to
-    the WOPISrc.
+    the source.
 
 getchildid
 
@@ -195,8 +219,8 @@ slideimport insert file=<staged name> [source=<source name>] [slides=<i0,i1,...>
                    [sourcepositions=<p0,p1,...>]
 
     Inserts pages of a presentation staged in the jail into the open document.
-    Only Impress documents are served. The staged name is the file a related
-    document wrote when it was asked to exportslides, which the server put in
+    Only Impress documents are served. The staged name is the file a remote
+    link wrote when it was asked to exportslides, which the server put in
     the staging area of this document's jail; the insert takes it, so the file
     leaves the staging area whether the pages are inserted or not. Slide
     indices are 0-based standard-page indices, and no list at all inserts every
@@ -265,14 +289,18 @@ slidelink update source=<source name> file=<staged name> [time=<source time>] [p
 
     Reads the pages of the document that are linked to a source document,
     refreshes the pages of one source, and takes the source off one page. Only
-    Impress and Draw documents hold such pages. A source name is the source
-    document as the user knows it, and it is the name a page records rather than
-    a location: nothing resolves it, and a refresh reads the related document it
-    names. A source name holds no path and no control character. The source name,
-    the WOPISrc and the staged name are all percent-encoded.
+    Impress and Draw documents hold such pages. A source is the persistent
+    link of the source document, the value a page records: the reference the
+    storage resolves to that document, which is no address the server reads
+    itself. The server matches it against the remote links of the document,
+    and for one no remote link stands for it asks the storage, when
+    CheckFileInfo says SupportsLinkAccess; a refresh then reads the remote link
+    it stands for. A source name is any text without a control character, at
+    most 1024 bytes long. The source name, the WOPISrc and the staged name are
+    all percent-encoded.
 
     A client sends all three. An update names a file the server staged in the
-    jail, which is what an exportslides of a related document comes to, so the
+    jail, which is what an exportslides of a remote link comes to, so the
     kit reads only a file of its own jail and never a location. An update may add
     a time, the time the source was last modified now, which the refreshed pages
     record so a later comparison tells whether they are up to date.
@@ -338,9 +366,11 @@ load <pathname>
 
     Deprecated.
 
-load [part=<partNumber>] url=<url> [timestamp=<time>] [lang=<locale>] [deviceFormFactor=<device type>] [timezone=<timezone>] [options=<options>]
+load [part=<part>] url=<url> [timestamp=<time>] [lang=<locale>] [deviceFormFactor=<device type>] [timezone=<timezone>] [options=<options>]
 
-    part is an optional parameter. <partNumber> is a number.
+    part is an optional parameter. <part> is a page identifier, or the
+    part's index in document order written in decimal form. The view opens
+    on that part.
 
     timestamp is an optional parameter.  <time> is provided in microseconds
     since the Unix epoch - midnight, January 1, 1970.
@@ -446,6 +476,7 @@ setclientpart part=<partNumber>
 selectclientpart part=<partNumber>
 
     Informs the server that the client changed the selection state of <partNumber>.
+    The server sends no reply.
 
 Part identifiers of a presentation or drawing document are the pages'
 GUIDs in braced form, {1BE1A269-4A03-4202-ACFE-0204C5E9BE1F}, not indexes
@@ -463,9 +494,9 @@ pages or the handout master page. Every message that
 names a part uses these identifiers for such documents - the tile,
 tilecombine, setclientpart, selectclientpart and getslide requests, and
 the tile:, delta:, invalidatetiles:, setpart:, curpart: and status:
-(selectedpart) responses. The one exception is the load message's part
-option, which keeps a positional index. Text and spreadsheet documents
-use plain part indexes throughout, written in decimal form.
+(selectedpart) responses. The load message's part option takes either
+form, a page identifier or a positional index. Text and spreadsheet
+documents use plain part indexes throughout, written in decimal form.
 
 moveselectedclientparts position=<positionNumber>
 
@@ -540,6 +571,12 @@ outlinestate type=<type> level=<level> index=<index> state=<state>
     <type> is 'column' or 'row', <level> and <index> are numbers, <state> is 'visible' or 'hidden'.
 
     Invokes  lok::Document::setOutlineState().
+
+reportmousepointer wanted=<wanted>
+
+    <wanted> is 'true' or 'false'. Says whether this client wants to be told the mouse pointer the
+    document asks for. A client that works out the pointer from the geometry it holds says 'false'
+    and is sent none until it says 'true' again.
 
 useractive
 
@@ -815,13 +852,15 @@ clipboardkey: <token>
     Current and previous hash remain valid for that period, always use
     the latest.
 
-relateddocumenttoken: <token>
+linktoken: <token>
 
-    A one-time token that authorizes this view to register a related document
-    over POST /cool/relateddocument, or to drop one over DELETE to the same
-    address. Sent when the view joins a document with remote_documents
-    enabled, and again with a fresh token after each accepted request, so a
-    token is never accepted twice. Keep only the latest.
+    A one-time token that authorizes this view to register a remote link
+    over POST /cool/links. Sent when the view joins a document with
+    remote_links enabled, and again with a fresh token after each accepted
+    request, so a token is never accepted twice. Keep only the latest. The
+    Link object of the POST names in PersistentLink the reference the
+    document's pages store for the file, which is the one name a view knows
+    the registered link by.
 
 contextmenu: <json description of the context menu>
 
@@ -845,37 +884,51 @@ downloadas: jail=<jail directory> dir=<a tmp dir> name=<name> port=<port> filena
     The client should then request http://server:port/jail/dir/name in order to download
     the document
 
-relateddocuments: <json>
+remotelinks: <json>
 
-    The related documents the server tracks for this document, from the
-    RelatedDocuments field of CheckFileInfo, from POST
-    /cool/relateddocument, and from the sources the document's own slide
-    links name. A DELETE to /cool/relateddocument takes one off the list,
-    for every view, and the fresh list goes out to all of them. Built for the receiving view: the source list and
-    last-modified times are the same for every view, but the state is that
-    view's own. Sent to a view when it joins and again when the shared list
-    or that view's own access or subscription state changes. Access tokens
-    are never included. The JSON carries a documents array of entries:
+    The remote links the server tracks for this document, from the
+    RemoteLinks field of CheckFileInfo (WOPISrc, BaseFileName,
+    LastModifiedTime and PersistentLink per entry), from POST
+    /cool/links, and from the sources the document's own slide
+    links name. A remotelinkremove takes one off the list, for every view,
+    and the fresh list goes out to all of them. Built for the receiving
+    view: the source list and last-modified times are the same for every
+    view, but the state is that view's own. Sent to a view when it joins
+    and again when the shared list or that view's own access or
+    subscription state changes. Access tokens and the addresses of the
+    remote documents are never included: a view knows a remote link by its
+    persistent link alone. The JSON carries a documents array of entries:
 
-        { "wopiSrc": "<decoded WOPISrc, no query>",
-          "name": "<the BaseFileName the integrator gave the document, or the
+        { "name": "<the BaseFileName the integrator gave the document, or the
                     file name at the end of its WOPISrc>",
           "lastModifiedTime": "<time or empty>",
-          "state": "noaccess|available|subscribed|connected|disconnected|failed|missing" }
+          "state": "noaccess|available|subscribed|connected|disconnected|failed|missing",
+          "persistentLink": "<the reference the document's pages store for the source>",
+          "access": "pending|resolved|notfound|denied|failed, or empty" }
 
     'noaccess' means the view holds no token for the source. 'available'
     means the view holds a token but has no live subscription. The other
     values follow the remotedocevent states of the view's subscription.
     'missing' means the source cannot be read: either it could not be read
     from storage, or it is a document the open one names as the source of
-    its slides that the storage listed no related document for. Such an
-    entry carries an empty wopiSrc and its name alone, so it says what the
-    slides were made from while nothing can reach it.
+    its slides that no remote link stands for. Such an entry carries its
+    name alone, so it says what the slides were made from while nothing can
+    reach it; its persistentLink is that name.
 
-remotedocevent: tag=<t> wopisrc=<encoded-WOPISrc> event=<event> [part=<p>] [value=<v>] [kind=<k>] [time=<encoded-time>]
+    'access' is what asking this view's storage for the persistent link came
+    to, and it is empty for a source this view never asked for, which is
+    every source on a storage that does not answer link access requests.
+    'pending' means a question is in flight, 'notfound' that the storage
+    knows no document for the link, 'denied' that this view's user may not
+    reach it, and 'failed' any other answer or none. A source that is
+    'resolved' is the remote link the storage named. See remotelinkresolve
+    for asking again.
+
+remotedocevent: tag=<t> source=<encoded persistent link> event=<event> [part=<p>] [value=<v>] [kind=<k>] [time=<encoded-time>]
 
     An event about a remote document a view subscribed to with
-    remotedocsubscribe. The tag is the session id of the view that opened the
+    remotedocsubscribe, named by the persistent link its remote link is
+    bound to. The tag is the session id of the view that opened the
     subscription. <event> is one of:
     * 'connected': the remote document is loaded and events are flowing
     * 'modified': the remote document's modified state changed to <value>
@@ -891,16 +944,20 @@ remotedocevent: tag=<t> wopisrc=<encoded-WOPISrc> event=<event> [part=<p>] [valu
     * 'missing': the source could not be read from storage (a missing file
       among the reasons); <kind> names the reason and the links to it are broken
     * 'unsubscribed': the link was dropped on request
-    * 'error': the subscription failed; <kind> names the reason
+    * 'error': the subscription failed; <kind> names the reason, among them
+      'notfound' for a persistent link no remote link is bound to and
+      'notoken' for a source the view holds no token for
 
-remotedoccommandresult: wopisrc=<encoded-WOPISrc>\n<inner server frame>
+remotedoccommandresult: source=<encoded persistent link>\n<inner server frame>
 
     A reply from a remote document to a remotedoccommand. The header line
-    names the remote by its WOPISrc; everything after the first newline is
+    names the remote by the persistent link its remote link is bound to;
+    everything after the first newline is
     the frame the remote node sent, verbatim, text or binary (for example
     slidesections:, status:, tile:, sendthumbnail:). The frame is delivered
     only to the view that issued commands to that remote, so several remote
-    documents can be driven in parallel and told apart by the WOPISrc.
+    documents can be driven in parallel and told apart by the persistent
+    link.
 
 error: cmd=<command> kind=<kind> [code=<error_code>] [params=1,2,3,...,N]
 <freeErrorText>
@@ -1037,6 +1094,17 @@ statechanged: <key>=<value>
     posts a Security_Label_Changed message to the host integration (see the SDK
     postMessage API). The separate on-load 'commandvalues command=.uno:SecurityLabel'
     seeds the banner without an action and is not broadcast.
+
+viewposition: [editmode=1] [zoompercent=<percent>] [x=<twips> y=<twips> width=<twips> height=<twips>]
+
+    Sent once, after the status that follows the load, when the document kept
+    the position of the view that left it before this one arrived. editmode is
+    present when that view was in editing mode. x and y are the top left corner
+    of the area it had in view, in document twips, followed by its size.
+
+    Only a CODA client sees this. A document keeps the position of a view that
+    goes away while the app keeps the document open but detaches its view, which
+    is what CODA does when it drops excess tab contents, and on reattach sends this.
 
 textselectioncontent:
 <JSON>

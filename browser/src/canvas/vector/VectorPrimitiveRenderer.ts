@@ -25,12 +25,20 @@ namespace cool {
 		// Slide size in twips. The background primitive fills this rectangle.
 		private _slideWidth = 0;
 		private _slideHeight = 0;
-		private _scratch = new VectorScratchCanvases();
-		private _gradients = new VectorGradientPrimitiveRenderer(this._scratch);
+		private _scratch: VectorScratchCanvases;
+		private _gradients: VectorGradientPrimitiveRenderer;
+		private _fillGraphics: VectorFillGraphicPrimitiveRenderer;
+		// Whether the content an editing view alone shows is drawn. Every
+		// entry point sets it from what the render is for, so it never
+		// carries over from an earlier render.
+		private _editViewContentVisible = false;
 
 		constructor(bitmapLookup?: BitmapLookup, fontLoaded?: FontLoadedLookup) {
 			this._bitmapLookup = bitmapLookup;
 			this._fontLoaded = fontLoaded;
+			this._scratch = new VectorScratchCanvases();
+			this._gradients = new VectorGradientPrimitiveRenderer(this._scratch);
+			this._fillGraphics = new VectorFillGraphicPrimitiveRenderer(bitmapLookup);
 		}
 
 		/// Set the slide size in twips before rendering a primitive tree, so the
@@ -38,6 +46,13 @@ namespace cool {
 		setSlideBounds(width: number, height: number): void {
 			this._slideWidth = width;
 			this._slideHeight = height;
+		}
+
+		/// Show or hide the content only an editing view shows: the prompt
+		/// of an empty placeholder and the stand-in graphic of an empty
+		/// picture. A thumbnail and a slideshow leave it out.
+		setEditViewContentVisible(visible: boolean): void {
+			this._editViewContentVisible = visible;
 		}
 
 		renderPrimitive(
@@ -109,6 +124,22 @@ namespace cool {
 						primitive as PolyPolygonAlphaGradientPrimitive,
 					);
 					break;
+				case FillHatchPrimitive.type:
+				case PolyPolygonHatchPrimitive.type:
+					this._renderHatch(context, primitive as FillHatchPrimitive);
+					break;
+				case FillGraphicPrimitive.type:
+					this._fillGraphics.renderFillGraphic(
+						context,
+						primitive as FillGraphicPrimitive,
+					);
+					break;
+				case PolyPolygonGraphicPrimitive.type:
+					this._fillGraphics.renderPolyPolygonGraphic(
+						context,
+						primitive as PolyPolygonGraphicPrimitive,
+					);
+					break;
 				case BitmapPrimitive.type:
 					this._renderBitmap(context, primitive as BitmapPrimitive);
 					break;
@@ -157,15 +188,36 @@ namespace cool {
 						primitive as ModifiedColorPrimitive,
 					);
 					return;
+				case PatternFillPrimitive.type:
+					// The children are one tile, and the pattern fill draws
+					// them once per tile itself.
+					this._renderPatternFill(context, primitive as PatternFillPrimitive);
+					return;
+				case TransparencePrimitive.type:
+					this._renderTransparence(context, primitive as TransparencePrimitive);
+					return;
+				case ShadowPrimitive.type:
+					this._renderShadow(context, primitive as ShadowPrimitive);
+					return;
+				case GlowPrimitive.type:
+					this._renderGlow(context, primitive as GlowPrimitive);
+					return;
+				case SoftEdgePrimitive.type:
+					this._renderSoftEdge(context, primitive as SoftEdgePrimitive);
+					return;
 				case MaskPrimitive.type:
 					this._renderMask(context, primitive as MaskPrimitive);
 					return;
 				case HiddenGeometryPrimitive.type:
-				case ExclusiveEditViewPrimitive.type:
 					// Non-painting subtree. Return so the recursion
 					// at the end of renderPrimitive does not descend
 					// into the children.
 					return;
+				case ExclusiveEditViewPrimitive.type:
+					// Wraps what only an editing view shows, so the
+					// recursion below descends into it only there.
+					if (!this._editViewContentVisible) return;
+					break;
 			}
 
 			if (primitive.children)
@@ -207,33 +259,6 @@ namespace cool {
 			// a subpath inside another subpath reads as a hole.
 			context.fill(path, 'evenodd');
 			if (needsAlphaBracket) context.restore();
-		}
-
-		/// Draw the dashed gray frame an edit view shows around a placeholder
-		/// that holds no content yet. The transform maps the unit square onto
-		/// the object, so the frame follows a rotated or sheared one. The
-		/// corners are mapped first and stroked in twips, which keeps the
-		/// width and the dashes even.
-		renderPlaceholderFrame(
-			context: CanvasRenderingContext2D,
-			transform: number[],
-		): void {
-			if (transform.length < 6) return;
-
-			context.save();
-			context.strokeStyle = '#808080';
-			context.lineWidth = this._hairlineWidth(context);
-			// Dash lengths in twips: the desktop's 160 and 80 in 1/100 mm.
-			context.setLineDash([91, 45]);
-			const [a, b, c, d, e, f] = transform;
-			const path = new Path2D();
-			path.moveTo(e, f);
-			path.lineTo(a + e, b + f);
-			path.lineTo(a + c + e, b + d + f);
-			path.lineTo(c + e, d + f);
-			path.closePath();
-			context.stroke(path);
-			context.restore();
 		}
 
 		/// Width that draws as one device pixel under the current transform.
@@ -633,31 +658,122 @@ namespace cool {
 			context: CanvasRenderingContext2D,
 			primitive: ModifiedColorPrimitive,
 		): void {
-			if (!primitive.children) return;
+			const children = primitive.children;
+			if (!children) return;
 
-			let filter: string | null = null;
+			let invert: boolean;
 			switch (primitive.modifier) {
 				case 'gray':
 				case 'luminance_to_alpha':
-					filter = 'grayscale(1)';
+					invert = false;
 					break;
 				case 'invert':
-					filter = 'invert(1)';
+					invert = true;
 					break;
-				// The "replace" modifier needs every primitive that
-				// draws a colour to consult a shared colour override.
-				// That is left for a follow-up, so for now children
-				// render with their original colours.
+				default:
+					// The "replace" modifier needs every primitive that
+					// draws a color to consult a shared color override.
+					// That is left for a follow-up, so for now children
+					// render with their original colors.
+					this._renderPrimitives(context, children);
+					return;
 			}
 
-			if (filter !== null) {
+			// Without a scratch canvas the canvas filter does it, in the
+			// browsers that have one.
+			const filtered = (): void => {
 				context.save();
-				context.filter = this._composeFilter(context, filter);
-				this._renderPrimitives(context, primitive.children);
+				context.filter = this._composeFilter(
+					context,
+					invert ? 'invert(1)' : 'grayscale(1)',
+				);
+				this._renderPrimitives(context, children);
 				context.restore();
+			};
+			this._scratch.withEffectSlots(filtered, (slot) => {
+				if (
+					!this._renderModifiedOnScratch(
+						context,
+						slot,
+						children,
+						primitive.bounds,
+						invert,
+					)
+				)
+					filtered();
+			});
+		}
+
+		// Gray or invert a subtree with blend modes, which every browser
+		// has. A blend works on colors that are not premultiplied and
+		// mixes in the backdrop where the content is partly transparent.
+		// Over opaque black each pixel is its premultiplied color
+		// instead, both modifiers map that exactly, and dividing by the
+		// alpha afterwards gives the plain color back. False when there
+		// is no canvas for it.
+		private _renderModifiedOnScratch(
+			context: CanvasRenderingContext2D,
+			slot: number,
+			children: Primitive[],
+			bounds: number[] | undefined,
+			invert: boolean,
+		): boolean {
+			const region = VectorScratchCanvases.effectRegion(context, bounds, 0);
+			if (!region) return true;
+			const content = this._renderToScratch(context, slot, children, region);
+			if (!content) return false;
+			const width = region.width;
+			const height = region.height;
+			const color = this._scratch.slotContext(slot + 1, width, height);
+			const alpha = color
+				? this._scratch.slotContext(slot + 2, width, height)
+				: null;
+			if (!color || !alpha) return false;
+
+			color.save();
+			color.fillStyle = '#000000';
+			color.fillRect(0, 0, width, height);
+			color.drawImage(content.canvas, 0, 0);
+
+			// The alpha as an opaque gray level, white where the content
+			// is solid.
+			alpha.save();
+			alpha.drawImage(content.canvas, 0, 0);
+			alpha.globalCompositeOperation = 'source-in';
+			alpha.fillStyle = '#ffffff';
+			alpha.fillRect(0, 0, width, height);
+			alpha.globalCompositeOperation = 'destination-over';
+			alpha.fillStyle = '#000000';
+			alpha.fillRect(0, 0, width, height);
+
+			if (invert) {
+				// The alpha less the premultiplied color is the
+				// premultiplied inverse.
+				color.globalCompositeOperation = 'difference';
+				color.drawImage(alpha.canvas, 0, 0);
 			} else {
-				this._renderPrimitives(context, primitive.children);
+				// A gray has no saturation, so the blend keeps only the
+				// luminosity, with the weights the engine uses.
+				color.globalCompositeOperation = 'saturation';
+				color.fillStyle = '#808080';
+				color.fillRect(0, 0, width, height);
 			}
+
+			// Color dodge divides by one less the source, so one less
+			// the alpha divides the premultiplied color by the alpha.
+			alpha.globalCompositeOperation = 'difference';
+			alpha.fillStyle = '#ffffff';
+			alpha.fillRect(0, 0, width, height);
+			color.globalCompositeOperation = 'color-dodge';
+			color.drawImage(alpha.canvas, 0, 0);
+
+			color.globalCompositeOperation = 'destination-in';
+			color.drawImage(content.canvas, 0, 0);
+			alpha.restore();
+			color.restore();
+
+			this._scratch.drawOnto(context, color, region);
+			return true;
 		}
 
 		/// Prepend a filter to the context's active filter list. The
@@ -694,6 +810,575 @@ namespace cool {
 			if (primitive.children)
 				this._renderPrimitives(context, primitive.children);
 			context.restore();
+		}
+
+		/// Drop the effects' scratch canvases. The next effect makes new ones.
+		releaseScratchCanvases(): void {
+			this._scratch.release();
+		}
+
+		// Gaussian deviation for a blur radius. The engine takes the radius as
+		// three deviations.
+		private static _blurDeviation(radius: number): number {
+			return radius / 3;
+		}
+
+		// Smallest blur or grow, in pixels, that shows.
+		private static readonly _VISIBLE_SPREAD = 0.5;
+
+		// How far a Gaussian blur reaches: three deviations.
+		private static _blurReach(deviation: number): number {
+			return 3 * deviation;
+		}
+
+		private _renderHatch(
+			context: CanvasRenderingContext2D,
+			primitive: FillHatchPrimitive | PolyPolygonHatchPrimitive,
+		): void {
+			const hatch = primitive.hatch;
+			if (!hatch) return;
+
+			const path = (primitive as PolyPolygonHatchPrimitive).path;
+			const output = (primitive as FillHatchPrimitive).outputRange;
+			const area = Range2D.fromArray(
+				(primitive as PolyPolygonHatchPrimitive).bounds ?? output,
+			);
+			if (!area) return;
+
+			context.save();
+			if (path) context.clip(new Path2D(path), 'evenodd');
+			else VectorScratchCanvases.clipToRange(context, area);
+
+			if (hatch.fillBackground && primitive.backgroundColor) {
+				context.fillStyle = primitive.backgroundColor;
+				context.fillRect(area.minX, area.minY, area.width, area.height);
+			}
+
+			this._drawHatchLines(
+				context,
+				hatch,
+				Range2D.fromArray(primitive.definitionRange) ?? area,
+				area,
+			);
+			context.restore();
+		}
+
+		// Single is one set along the hatch angle, double adds one square
+		// to it, and triple a third at forty-five degrees.
+		private _drawHatchLines(
+			context: CanvasRenderingContext2D,
+			hatch: HatchAttribute,
+			layout: Range2D,
+			area: Range2D,
+		): void {
+			const pixels = VectorScratchCanvases.pixelsPerUnit(context);
+			const distance = hatch.distance ?? 0;
+			if (!(distance > 0)) return;
+
+			// Lines under a pixel apart read as a solid area and cost a
+			// stroke each, so they stop at a pixel.
+			const spacing = Math.max(distance, 1 / pixels);
+			const angle = hatch.angle ?? 0;
+			const angles = [angle];
+			if (hatch.style === 'double' || hatch.style === 'triple')
+				angles.push(angle - Math.PI / 2);
+			if (hatch.style === 'triple') angles.push(angle - Math.PI / 4);
+
+			const centerX = layout.centerX;
+			const centerY = layout.centerY;
+			// Far enough to cross the whole area, even though the lines
+			// are laid out around the middle of the definition range.
+			const reach =
+				Math.hypot(area.width, area.height) / 2 +
+				Math.hypot(centerX - area.centerX, centerY - area.centerY);
+			const steps = Math.ceil(reach / spacing);
+
+			context.strokeStyle = hatch.color ?? '#000000';
+			context.lineWidth = 1 / pixels;
+			context.beginPath();
+			for (const lineAngle of angles) {
+				// The hatch angle turns anticlockwise, y grows down.
+				const alongX = Math.cos(lineAngle);
+				const alongY = -Math.sin(lineAngle);
+				const acrossX = Math.sin(lineAngle);
+				const acrossY = Math.cos(lineAngle);
+				for (let step = -steps; step <= steps; step++) {
+					const offset = step * spacing;
+					const originX = centerX + acrossX * offset;
+					const originY = centerY + acrossY * offset;
+					context.moveTo(originX - alongX * reach, originY - alongY * reach);
+					context.lineTo(originX + alongX * reach, originY + alongY * reach);
+				}
+			}
+			context.stroke();
+		}
+
+		private _renderPatternFill(
+			context: CanvasRenderingContext2D,
+			primitive: PatternFillPrimitive,
+		): void {
+			const path = primitive.path;
+			const area = primitive.bounds;
+			const reference = primitive.referenceRange;
+			if (!path || !area || !reference) return;
+			if (area.length < 4 || reference.length < 4) return;
+			const children = primitive.children;
+			if (!children) return;
+
+			const areaWidth = area[2] - area[0];
+			const areaHeight = area[3] - area[1];
+			const unitWidth = reference[2] - reference[0];
+			const unitHeight = reference[3] - reference[1];
+			const tileWidth = unitWidth * areaWidth;
+			const tileHeight = unitHeight * areaHeight;
+			if (!(tileWidth > 0 && tileHeight > 0)) return;
+
+			const pixels = VectorScratchCanvases.pixelsPerUnit(context);
+			// Skip tiles smaller than a pixel. They draw nothing visible,
+			// and there would be one per pixel.
+			if (tileWidth * pixels < 1 || tileHeight * pixels < 1) return;
+
+			context.save();
+			context.clip(new Path2D(path), 'evenodd');
+			// The tiles are laid out in the unit square of the bounds.
+			context.translate(area[0], area[1]);
+			context.scale(areaWidth, areaHeight);
+
+			// Repeat one drawn tile, or draw each tile when there is no canvas
+			// for one.
+			const eachTile = () =>
+				this._drawEachPatternTile(context, reference, children);
+			this._scratch.withEffectSlots(eachTile, (slot) => {
+				if (!this._fillWithPatternTile(context, slot, reference, children)) {
+					eachTile();
+				}
+			});
+
+			context.restore();
+		}
+
+		// Map the children onto each tile, clipped to it as in the engine.
+		private _drawEachPatternTile(
+			context: CanvasRenderingContext2D,
+			reference: number[],
+			children: Primitive[],
+		): void {
+			const unitWidth = reference[2] - reference[0];
+			const unitHeight = reference[3] - reference[1];
+			VectorScratchCanvases.iterateTiles(reference, 0, 0, (x, y) => {
+				context.save();
+				context.translate(x, y);
+				context.scale(unitWidth, unitHeight);
+				context.beginPath();
+				context.rect(0, 0, 1, 1);
+				context.clip();
+				this._renderPrimitives(context, children);
+				context.restore();
+			});
+		}
+
+		// Fill the bounds with one tile drawn at the target's resolution. False
+		// without a canvas, or when the tile is larger than the target.
+		private _fillWithPatternTile(
+			context: CanvasRenderingContext2D,
+			slot: number,
+			reference: number[],
+			children: Primitive[],
+		): boolean {
+			const unitWidth = reference[2] - reference[0];
+			const unitHeight = reference[3] - reference[1];
+			const matrix = context.getTransform();
+			const width = Math.ceil(Math.hypot(matrix.a, matrix.b) * unitWidth);
+			const height = Math.ceil(Math.hypot(matrix.c, matrix.d) * unitHeight);
+			if (width > context.canvas.width || height > context.canvas.height)
+				return false;
+
+			const tile = this._scratch.slotContext(slot, width, height);
+			if (!tile) return false;
+			tile.setTransform(width, 0, 0, height, 0, 0);
+			this._renderPrimitives(tile, children);
+
+			const pattern = context.createPattern(tile.canvas, 'repeat');
+			if (!pattern) return false;
+			// Scale the whole-pixel canvas back to the exact tile size.
+			pattern.setTransform({
+				a: unitWidth / width,
+				b: 0,
+				c: 0,
+				d: unitHeight / height,
+				e: reference[0],
+				f: reference[1],
+			});
+			context.fillStyle = pattern;
+			context.fillRect(0, 0, 1, 1);
+			return true;
+		}
+
+		// Draw a subtree onto a scratch canvas aligned with the region. A
+		// matrix applies on top of the target's transform.
+		private _renderToScratch(
+			context: CanvasRenderingContext2D,
+			slot: number,
+			children: Primitive[] | undefined,
+			region: ScratchRegion,
+			matrix?: number[],
+		): CanvasRenderingContext2D | null {
+			const scratch = this._scratch.slotContext(
+				slot,
+				region.width,
+				region.height,
+			);
+			if (!scratch) return null;
+
+			VectorScratchCanvases.alignWith(scratch, context, region);
+			if (matrix && matrix.length >= 6) {
+				scratch.transform(
+					matrix[0],
+					matrix[1],
+					matrix[2],
+					matrix[3],
+					matrix[4],
+					matrix[5],
+				);
+			}
+			if (children) this._renderPrimitives(scratch, children);
+			return scratch;
+		}
+
+		// Draw the source's coverage onto a same-size target in one color,
+		// blurred by a Gaussian of the deviation in pixels. The canvas shadow
+		// does the blur, with shadowBlur twice the deviation, and every browser
+		// supports it. The source goes one width off to the left, so only its
+		// shadow lands.
+		private static _drawBlurredSilhouette(
+			target: CanvasRenderingContext2D,
+			source: HTMLCanvasElement,
+			color: string,
+			deviation: number,
+		): void {
+			target.save();
+			target.setTransform(1, 0, 0, 1, 0, 0);
+			target.shadowColor = color;
+			target.shadowBlur = 2 * deviation;
+			target.shadowOffsetX = source.width;
+			target.shadowOffsetY = 0;
+			target.drawImage(source, -source.width, 0);
+			target.restore();
+		}
+
+		// Draws the children unchanged.
+		private _childrenPainter(
+			context: CanvasRenderingContext2D,
+			primitive: Primitive,
+		): () => void {
+			return () => {
+				if (primitive.children)
+					this._renderPrimitives(context, primitive.children);
+			};
+		}
+
+		// Grow the scratch content by the given pixels, drawing the canvas onto
+		// itself at offsets around a full turn.
+		private _dilateScratch(
+			scratch: CanvasRenderingContext2D,
+			radius: number,
+		): void {
+			// Copies a couple of pixels apart, so thin shapes stay covered,
+			// capped per effect.
+			const steps = Math.min(
+				32,
+				Math.max(8, Math.ceil((Math.PI * radius) / 2)),
+			);
+			// Over a full turn the steps sum to pi offsets in any direction.
+			const offset = (Math.PI * radius) / steps;
+
+			scratch.save();
+			scratch.setTransform(1, 0, 0, 1, 0, 0);
+			scratch.globalCompositeOperation = 'source-over';
+			for (let step = 0; step < steps; step++) {
+				const angle = (step / steps) * 2 * Math.PI;
+				scratch.drawImage(
+					scratch.canvas,
+					Math.cos(angle) * offset,
+					Math.sin(angle) * offset,
+				);
+			}
+			scratch.restore();
+		}
+
+		// Shrink the scratch content by growing its outside and cutting that
+		// away.
+		private _erodeScratch(
+			scratch: CanvasRenderingContext2D,
+			radius: number,
+			outsideSlot: number,
+		): void {
+			const width = scratch.canvas.width;
+			const height = scratch.canvas.height;
+			const outside = this._scratch.slotContext(outsideSlot, width, height);
+			if (!outside) return;
+
+			// The outside, solid.
+			outside.save();
+			outside.setTransform(1, 0, 0, 1, 0, 0);
+			outside.fillStyle = '#000000';
+			outside.fillRect(0, 0, width, height);
+			outside.globalCompositeOperation = 'destination-out';
+			outside.drawImage(scratch.canvas, 0, 0);
+			outside.restore();
+
+			this._dilateScratch(outside, radius);
+
+			scratch.save();
+			scratch.setTransform(1, 0, 0, 1, 0, 0);
+			scratch.globalCompositeOperation = 'destination-out';
+			scratch.drawImage(outside.canvas, 0, 0);
+			scratch.restore();
+		}
+
+		// A subtree in one color, moved by the matrix, grown by the dilate
+		// radius and blurred by a Gaussian of the deviation in pixels. The
+		// bounds cover the result. The subtree goes on the slot's canvas, the
+		// result on the next.
+		private _renderColoredBlur(
+			context: CanvasRenderingContext2D,
+			children: Primitive[] | undefined,
+			bounds: number[] | undefined,
+			slot: number,
+			color: string,
+			deviation: number,
+			dilateRadius: number,
+			opacity: number,
+			matrix?: number[],
+		): void {
+			const region = VectorScratchCanvases.effectRegion(
+				context,
+				bounds,
+				dilateRadius + VectorPrimitiveRenderer._blurReach(deviation),
+			);
+			if (!region) return;
+			const scratch = this._renderToScratch(
+				context,
+				slot,
+				children,
+				region,
+				matrix,
+			);
+			if (!scratch) return;
+
+			if (dilateRadius >= VectorPrimitiveRenderer._VISIBLE_SPREAD)
+				this._dilateScratch(scratch, dilateRadius);
+			const blurred = this._scratch.slotContext(
+				slot + 1,
+				region.width,
+				region.height,
+			);
+			if (!blurred) return;
+			VectorPrimitiveRenderer._drawBlurredSilhouette(
+				blurred,
+				scratch.canvas,
+				color,
+				deviation,
+			);
+			// A color modifier around the effect still applies, through the
+			// target's filter.
+			this._scratch.drawOnto(context, blurred, region, opacity);
+		}
+
+		private _renderShadow(
+			context: CanvasRenderingContext2D,
+			primitive: ShadowPrimitive,
+		): void {
+			// The object is its own primitive, so without a canvas the shadow
+			// is left out.
+			this._scratch.withEffectSlots(undefined, (slot) => {
+				// Blurred by the whole radius, not grown.
+				this._renderColoredBlur(
+					context,
+					primitive.children,
+					primitive.bounds,
+					slot,
+					primitive.color ?? '#000000',
+					VectorPrimitiveRenderer._blurDeviation(
+						(primitive.blur ?? 0) *
+							VectorScratchCanvases.pixelsPerUnit(context),
+					),
+					0,
+					1,
+					primitive.matrix,
+				);
+			});
+		}
+
+		private _renderGlow(
+			context: CanvasRenderingContext2D,
+			primitive: GlowPrimitive,
+		): void {
+			// The object is its own primitive, so without a canvas the halo is
+			// left out.
+			this._scratch.withEffectSlots(undefined, (slot) => {
+				// Grow by half the radius and blur over the other half, as the
+				// engine does, so the halo is solid at the object's edge.
+				const radius =
+					(primitive.radius ?? 0) *
+					VectorScratchCanvases.pixelsPerUnit(context);
+				this._renderColoredBlur(
+					context,
+					primitive.children,
+					primitive.bounds,
+					slot,
+					primitive.color ?? '#000000',
+					VectorPrimitiveRenderer._blurDeviation(radius / 2),
+					radius / 2,
+					1 - (primitive.transparency ?? 0),
+				);
+			});
+		}
+
+		private _renderSoftEdge(
+			context: CanvasRenderingContext2D,
+			primitive: SoftEdgePrimitive,
+		): void {
+			// Without a scratch canvas the children are drawn plainly.
+			const plain = this._childrenPainter(context, primitive);
+			this._scratch.withEffectSlots(plain, (slot) => {
+				const radius =
+					(primitive.radius ?? 0) *
+					VectorScratchCanvases.pixelsPerUnit(context);
+				const deviation = VectorPrimitiveRenderer._blurDeviation(radius);
+				// Margin for the erode and the blur, so the shape past the
+				// target's edge still counts as the shape.
+				const region = VectorScratchCanvases.effectRegion(
+					context,
+					primitive.bounds,
+					radius + VectorPrimitiveRenderer._blurReach(deviation),
+				);
+				if (!region) return;
+				const content = this._renderToScratch(
+					context,
+					slot,
+					primitive.children,
+					region,
+				);
+				if (!content) {
+					plain();
+					return;
+				}
+
+				const shrunk =
+					radius >= VectorPrimitiveRenderer._VISIBLE_SPREAD
+						? this._scratch.slotContext(slot + 1, region.width, region.height)
+						: null;
+				if (!shrunk) {
+					this._scratch.drawOnto(context, content, region);
+					return;
+				}
+
+				// Erode by the radius and blur back out, so the alpha rises
+				// from zero at the edge to solid a radius inside.
+				shrunk.save();
+				shrunk.setTransform(1, 0, 0, 1, 0, 0);
+				shrunk.globalCompositeOperation = 'copy';
+				shrunk.drawImage(content.canvas, 0, 0);
+				shrunk.restore();
+				this._erodeScratch(shrunk, radius, slot + 2);
+
+				// The erode's canvas takes the blurred mask.
+				const fade = this._scratch.slotContext(
+					slot + 2,
+					region.width,
+					region.height,
+				);
+				if (!fade) {
+					this._scratch.drawOnto(context, content, region);
+					return;
+				}
+				VectorPrimitiveRenderer._drawBlurredSilhouette(
+					fade,
+					shrunk.canvas,
+					'#000000',
+					deviation,
+				);
+
+				// The fade multiplies the children's own alpha.
+				content.save();
+				content.setTransform(1, 0, 0, 1, 0, 0);
+				content.globalCompositeOperation = 'destination-in';
+				content.drawImage(fade.canvas, 0, 0);
+				content.restore();
+
+				this._scratch.drawOnto(context, content, region);
+			});
+		}
+
+		private _renderTransparence(
+			context: CanvasRenderingContext2D,
+			primitive: TransparencePrimitive,
+		): void {
+			// An empty mask hides everything.
+			const maskPrimitives = primitive.transparence;
+			if (!maskPrimitives?.length) return;
+
+			// Without a scratch canvas the children are drawn plainly.
+			const plain = this._childrenPainter(context, primitive);
+			this._scratch.withEffectSlots(plain, (slot) => {
+				const region = VectorScratchCanvases.effectRegion(
+					context,
+					primitive.bounds,
+					0,
+				);
+				if (!region) return;
+				const content = this._renderToScratch(
+					context,
+					slot,
+					primitive.children,
+					region,
+				);
+				const mask = content
+					? this._scratch.slotContext(slot + 1, region.width, region.height)
+					: null;
+				if (!content || !mask) {
+					plain();
+					return;
+				}
+
+				// The mask goes over white, which is fully clear, as in the
+				// engine.
+				const width = region.width;
+				const height = region.height;
+				mask.setTransform(1, 0, 0, 1, 0, 0);
+				mask.fillStyle = '#ffffff';
+				mask.fillRect(0, 0, width, height);
+				VectorScratchCanvases.alignWith(mask, context, region);
+				this._renderPrimitives(mask, maskPrimitives);
+
+				const contentImage = content.getImageData(0, 0, width, height);
+				const maskImage = mask.getImageData(0, 0, width, height);
+				VectorPrimitiveRenderer._applyLuminanceMask(
+					contentImage.data,
+					maskImage.data,
+				);
+				content.putImageData(contentImage, 0, 0);
+
+				this._scratch.drawOnto(context, content, region);
+			});
+		}
+
+		// Scale the content's alpha by one minus the mask's luminance, with the
+		// engine's weights.
+		private static _applyLuminanceMask(
+			content: Uint8ClampedArray,
+			mask: Uint8ClampedArray,
+		): void {
+			for (let index = 0; index < content.length; index += 4) {
+				const luminance =
+					mask[index] * 0.2125 +
+					mask[index + 1] * 0.7154 +
+					mask[index + 2] * 0.0721;
+				content[index + 3] = Math.round(
+					content[index + 3] * (1 - luminance / 255),
+				);
+			}
 		}
 
 		private _renderPrimitives(

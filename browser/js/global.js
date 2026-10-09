@@ -210,6 +210,13 @@ class BrowserProperties {
 			isCODesktop: function() {
 				return global.ThisIsTheMacOSApp || global.ThisIsTheQtApp || global.ThisIsTheWindowsApp;
 			},
+			// The apps whose engine drives the system clipboard through the
+			// installed clipboard provider: copy advertises straight onto the
+			// system clipboard and .uno:Paste reads it back in the engine, so
+			// the browser moves no clipboard payload itself.
+			hasEngineClipboardProvider: function() {
+				return global.ThisIsTheiOSApp || global.mode.isCODesktop();
+			},
 			isDesktop: function() {
 				if (global.ThisIsTheWindowsApp || global.ThisIsTheQtApp	|| global.ThisIsTheMacOSApp)
 					return true;
@@ -218,6 +225,9 @@ class BrowserProperties {
 					return true;
 
 				return !global.L.Browser.mobile;
+			},
+			isInteractivePreview: function() {
+				return global.coolPreview;
 			},
 			getDeviceFormFactor: function() {
 				if (global.mode.isSmallScreenDevice())
@@ -280,6 +290,7 @@ class InitializerBase {
 		window.protocolDebug = false;
 		window.enableDebug = false;
 		window.frameAncestors = "";
+		window.relayOrigin = "";
 		window.socketProxy = false;
 		window.uiDefaults = {};
 		window.useStatusbarSaveIndicator = false;
@@ -287,6 +298,10 @@ class InitializerBase {
 		window.deeplEnabled = false;
 		// Match COOL's ai.ethical_rating_message default (true).
 		window.aiEthicalRatingMessage = true;
+		// Match COOL's ai.show_ai_sidebar default (false).
+		window.showAISidebar = false;
+		// Match COOL's ai.show_ai_notebookbar default (false).
+		window.showAINotebookbar = false;
 		// Match COOL's zotero.enable default (true). On the desktop the plugin
 		// is still gated on a user-provided API key (and !isSmallScreenDevice)
 		// so this only surfaces the feature where it makes sense.
@@ -300,9 +315,11 @@ class InitializerBase {
 		window.indirectionUrl = "";
 		window.geolocationSetup = false;
 		window.canvasSlideshowEnabled = false;
-		window.remoteDocumentsEnabled = false;
+		window.remoteLinksEnabled = false;
 		window.wopiSettingBaseUrl = element.dataset.wopiSettingBaseUrl;
 		window.enableExperimentalFeatures = element.dataset.enableExperimentalFeatures === 'true';
+
+		window.coolPreview = element.dataset.coolPreview === 'true';
 
 		window.tileSize = 256;
 
@@ -323,7 +340,6 @@ class InitializerBase {
 
 			document.getElementById('content-keeper').remove();
 		}, false);
-
 		let productName = document.getElementById("init-product-branding-name") ? document.getElementById("init-product-branding-name").value : "";
 		if (typeof productName === 'string' && productName.length) {
 			window.brandProductName = productName;
@@ -461,6 +477,9 @@ class BrowserInitializer extends InitializerBase {
 		window.protocolDebug = element.dataset.protocolDebug.toLowerCase().trim() === "true";
 		window.enableDebug = element.dataset.enableDebug.toLowerCase().trim() === "true";
 		window.frameAncestors = decodeURIComponent(element.dataset.frameAncestors);
+		// The origin of the page that relays messages between this page and the
+		// WOPI host. Empty when the WOPI host embeds this page directly.
+		window.relayOrigin = element.dataset.relayOrigin || "";
 		window.socketProxy = element.dataset.socketProxy.toLowerCase().trim() === "true";
 		window.uiDefaults = JSON.parse(atob(element.dataset.uiDefaults));
 		// The server administrator can choose the opening zoom for every text
@@ -473,6 +492,8 @@ class BrowserInitializer extends InitializerBase {
 		window.checkFileInfoOverride = element.dataset.checkFileInfoOverride;
 		window.deeplEnabled = element.dataset.deeplEnabled.toLowerCase().trim() === "true";
 		window.aiEthicalRatingMessage = element.dataset.aiEthicalRatingMessage.toLowerCase().trim() === "true";
+		window.showAISidebar = element.dataset.showAiSidebar.toLowerCase().trim() === "true";
+		window.showAINotebookbar = element.dataset.showAiNotebookbar.toLowerCase().trim() === "true";
 		window.zoteroEnabled = element.dataset.zoteroEnabled.toLowerCase().trim() === "true";
 		window.documentSigningEnabled = element.dataset.documentSigningEnabled.toLowerCase().trim() === "true";
 		window.savedUIState = element.dataset.savedUiState.toLowerCase().trim() === "true";
@@ -481,7 +502,7 @@ class BrowserInitializer extends InitializerBase {
 		window.indirectionUrl = element.dataset.indirectionUrl;
 		window.geolocationSetup = element.dataset.geolocationSetup.toLowerCase().trim() === "true";
 		window.canvasSlideshowEnabled = element.dataset.canvasSlideshowEnabled.toLowerCase().trim() === "true";
-		window.remoteDocumentsEnabled = element.dataset.remoteDocumentsEnabled.toLowerCase().trim() === "true";
+		window.remoteLinksEnabled = element.dataset.remoteLinksEnabled.toLowerCase().trim() === "true";
 		window.wopiSettingBaseUrl = element.dataset.wopiSettingBaseUrl;
 		// The value is percent-encoded server-side (see FileServer.cpp) before
 		// being embedded in the data attribute, so decode it back for display.
@@ -544,7 +565,7 @@ class MobileAppInitializer extends InitializerBase {
 		window.idleTimeoutSecs = 1000000;
 
 		window.canvasSlideshowEnabled = true;
-		window.remoteDocumentsEnabled = false;
+		window.remoteLinksEnabled = false;
 		window.enableAccessibility = true;
 		window.enableExperimentalFeatures = element.dataset.enableExperimentalFeatures === 'true';
 	}
@@ -1232,6 +1253,22 @@ function showWelcomeSVG() {
 			}
 			return global.prefs.getBoolean('darkTheme');
 		},
+
+		// The automatic spell checking choice is kept per document type, because a
+		// spreadsheet of codes and abbreviations wants a different default from a
+		// text document. The document type is not known yet when the 'load' message
+		// goes out, so name every choice that was made and let the kit pick the one
+		// that applies. Returns an empty string when nothing was ever chosen, which
+		// leaves each document type to its own default in core.
+		spellOnlineForLoad: function() {
+			const parts = [];
+			for (const docType of ['text', 'spreadsheet', 'presentation', 'drawing']) {
+				const value = global.prefs.get(docType + '.spellOnline');
+				if (value)
+					parts.push(docType + ':' + value);
+			}
+			return parts.join(',');
+		},
 	};
 
 	global.getAccessibilityState = function () {
@@ -1276,6 +1313,15 @@ function showWelcomeSVG() {
 		}
 	}
 	// End 24.04.4.1 renames
+
+	// The automatic spell checking choice became one per document type. A value
+	// stored before that was whatever the user last chose in any application, so
+	// it still stands for the document types that shared its default. Calc is
+	// left out: it now starts with spell checking off, which is the whole point
+	// of the split.
+	for (const docType of ['text', 'presentation', 'drawing']) {
+		global.prefs._renameLocalStoragePref('spellOnline', `${docType}.spellOnline`);
+	}
 
 	global.keyboard = {
 		onscreenKeyboardHint: global.uiDefaults['onscreenKeyboardHint'],
@@ -1511,6 +1557,22 @@ function showWelcomeSVG() {
 			e.returnValue = false;
 		}
 	}, false);
+
+	// The colour as "#rrggbb", or the empty string when it cannot be read.
+	global.getFocusRingColor = function () {
+		const probe = document.createElement('div');
+		probe.style.outlineColor = '-webkit-focus-ring-color';
+		document.documentElement.appendChild(probe);
+		const computed = global.getComputedStyle(probe).outlineColor;
+		probe.remove();
+
+		const parts = computed.match(/\d+/g);
+		if (!parts || parts.length < 3)
+			return '';
+		return '#' + parts.slice(0, 3).map(function (part) {
+			return parseInt(part, 10).toString(16).padStart(2, '0');
+		}).join('');
+	};
 
 	global.fakeWebSocketCounter = 0;
 	global.FakeWebSocket = function () {
@@ -2445,13 +2507,12 @@ function showWelcomeSVG() {
 					if (lang) {
 						msg += ' lang=' + lang;
 					}
-					// renderingOptions?
 				}
 
 				if (global.deviceFormFactor) {
 					msg += ' deviceFormFactor=' + global.deviceFormFactor;
 				}
-				var spellOnline = window.prefs.get('spellOnline');
+				var spellOnline = window.prefs.spellOnlineForLoad();
 				if (spellOnline) {
 					msg += ' spellOnline=' + spellOnline;
 				}
@@ -2472,6 +2533,11 @@ function showWelcomeSVG() {
 				// The interface is not built yet, so leave the two values the engine
 				// is being given here for it to pick up.
 				global.themeSentWithLoad = { theme: darkTheme, background: darkBackground };
+
+				const focusRingColor = global.getFocusRingColor();
+				if (focusRingColor) {
+					msg += ' focusRingColor=' + focusRingColor;
+				}
 
 				msg += ' timezone=' + Intl.DateTimeFormat().resolvedOptions().timeZone;
 				msg += ' clientvisiblearea=' + window.makeClientVisibleArea();

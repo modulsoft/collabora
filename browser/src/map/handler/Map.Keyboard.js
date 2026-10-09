@@ -7,7 +7,7 @@
  * at TextInput.
  */
 
-/* global app UNOKey RenderManager GraphicSelection */
+/* global app UNOKey RenderManager GraphicSelection JSDialog */
 
 window.L.Map.mergeOptions({
 	keyboard: true,
@@ -315,12 +315,15 @@ window.L.Map.Keyboard = window.L.Handler.extend({
 		window.L.DomEvent.on(this._keyEventContainer, 'keydown keyup keypress', this._onKeyDown, this);
 		window.L.DomEvent.on(window.document, 'keydown', this._globalKeyEvent, this);
 		window.document.addEventListener('keyup', this._globalKeyUp.bind(this), true);
+		this._boundGlobalMouseDown = this._globalMouseDown.bind(this);
+		window.document.addEventListener('mousedown', this._boundGlobalMouseDown, true);
 	},
 
 	removeHooks: function () {
 		window.L.DomEvent.off(this._keyEventContainer, 'keydown keyup keypress', this._onKeyDown, this);
 		window.L.DomEvent.off(window.document, 'keydown', this._globalKeyEvent, this);
 		window.document.removeEventListener('keyup', this._globalKeyUp.bind(this));
+		window.document.removeEventListener('mousedown', this._boundGlobalMouseDown, true);
 	},
 
 	_ignoreKeyEvent: function(ev) {
@@ -377,7 +380,16 @@ window.L.Map.Keyboard = window.L.Handler.extend({
 			return false;
 
 		var preview = docLayer._preview;
-		return !!preview && (preview.partsFocused === true || preview.hasSlideFocus());
+		if (!preview)
+			return false;
+
+		// The slide the sorter marks keeps the keys while the focus rests on it, and it keeps
+		// them as well over a preview the sorter builds again, where the focus falls back to
+		// the body. The document takes them back as soon as its own input holds the focus.
+		if (this._map.hasFocus() || JSDialog.IsAnyInputFocused())
+			return false;
+
+		return preview.partsFocused === true || preview.hasSlideFocus();
 	},
 
 	_isNoModifier: function (ev) {
@@ -469,6 +481,18 @@ window.L.Map.Keyboard = window.L.Handler.extend({
 
 		if (app.UI.compactViewAccessibility) {
 			app.UI.compactViewAccessibility.onDocumentKeyDown(ev);
+		}
+	},
+
+	// _globalMouseDown - lets the accessibility helpers of both user interfaces
+	// record that a mouse button went down. The event itself is left untouched.
+	_globalMouseDown: function() {
+		if (app.UI.notebookbarAccessibility) {
+			app.UI.notebookbarAccessibility.onDocumentMouseDown();
+		}
+
+		if (app.UI.compactViewAccessibility) {
+			app.UI.compactViewAccessibility.onDocumentMouseDown();
 		}
 	},
 
@@ -612,7 +636,7 @@ window.L.Map.Keyboard = window.L.Handler.extend({
 				this._map.jsdialog &&
 				!this._map.jsdialog.hasDialogOpened()
 		) {
-			this._map.deletePage(this._map._docLayer._selectedPart);
+			app.dispatcher.dispatch('deletepage');
 		}
 	},
 
@@ -677,7 +701,7 @@ window.L.Map.Keyboard = window.L.Handler.extend({
 		var docLayer = this._map._docLayer;
 
 		// if any key is pressed, we stop the following other users
-		if (docLayer) this._map.userList.followUser(docLayer._viewId, false);
+		if (docLayer && !window.mode.isInteractivePreview()) this._map.userList.followUser(docLayer._viewId, false);
 
 		if (window.KeyboardShortcuts.processEvent(app.UI.language.fromURL, ev)) {
 			ev.shortCutActivated = true;
@@ -780,6 +804,11 @@ window.L.Map.Keyboard = window.L.Handler.extend({
 		}
 
 		var unoKeyCode = this._toUNOKeyCode(keyCode);
+
+		// A key that types "+" is the ADD key for the document core, as on the desktop. On many
+		// layouts "+" shares a key with "=" and reports the same keyCode, so check the character.
+		if (ev.key === '+')
+			unoKeyCode = UNOKey.ADD;
 
 		if (this.modifier) {
 			unoKeyCode |= this.modifier;

@@ -52,6 +52,8 @@ std::thread TimeoutThread;
 [[maybe_unused]] std::mutex TimeoutThreadMutex;
 std::condition_variable TimeoutConditionVariable;
 bool KitWorkFinished = false;
+// The kit test whose timeout is started by startKitTimeout().
+[[maybe_unused]] UnitBase* PendingKitTimeoutInstance = nullptr;
 
 } // namespace
 
@@ -87,17 +89,56 @@ void UnitBase::initTestSuiteOptions()
     }
 }
 
+bool UnitBase::matchesFilter(std::size_t index)
+{
+    const std::string& name = GlobalArray[index]->getTestname();
+    return strstr(Util::toLower(name).c_str(), GlobalTestOptions.getFilter().c_str()) != nullptr;
+}
+
 void UnitBase::filter()
 {
-    const auto& filter = GlobalTestOptions.getFilter();
-    for (; GlobalArray[GlobalIndex] != nullptr; ++GlobalIndex)
+    // Stop at the first test that matches, or at the dummy instance, which is the last entry.
+    for (; GlobalArray[GlobalIndex + 1] != nullptr; ++GlobalIndex)
     {
-        const std::string& name = GlobalArray[GlobalIndex]->getTestname();
-        if (strstr(Util::toLower(name).c_str(), filter.c_str()))
+        if (matchesFilter(GlobalIndex))
             break;
 
-        LOG_INF("Skipping test [" << name << "] per filter [" << filter << ']');
+        LOG_INF("Skipping test [" << GlobalArray[GlobalIndex]->getTestname() << "] per filter ["
+                                  << GlobalTestOptions.getFilter() << ']');
     }
+}
+
+bool UnitBase::haveMoreTests()
+{
+    // Nothing follows the dummy instance, which is the entry before the null termination.
+    if (!GlobalArray || GlobalIndex < 0 || !GlobalArray[GlobalIndex] ||
+        !GlobalArray[GlobalIndex + 1])
+        return false;
+
+    // Look for a later test that matches, stopping before the dummy.
+    for (std::size_t index = GlobalIndex + 1; GlobalArray[index + 1] != nullptr; ++index)
+    {
+        if (matchesFilter(index))
+            return true;
+    }
+
+    return false;
+}
+
+UnitBase* UnitBase::createDummy(UnitType type)
+{
+    switch (type)
+    {
+        case UnitType::Wsd:
+            return new UnitWSD("DummyUnitWSD");
+        case UnitType::Kit:
+            return new UnitKit("DummyUnitKit");
+        case UnitType::Tool:
+            return new UnitTool("DummyUnitTool");
+    }
+
+    assert(false);
+    return nullptr;
 }
 
 void UnitBase::selfTest()
@@ -143,10 +184,10 @@ bool UnitBase::init([[maybe_unused]] UnitType type, [[maybe_unused]] const std::
     GlobalArray = nullptr;
     GlobalIndex = -1;
 
+#if ENABLE_DEBUG
     int testCount = 0;
 
     // Only in debug builds do we support tests.
-#if ENABLE_DEBUG
     if (!unitLibPath.empty())
     {
         auto tests = linkAndCreateUnit(type, unitLibPath);
@@ -165,6 +206,9 @@ bool UnitBase::init([[maybe_unused]] UnitType type, [[maybe_unused]] const std::
             GlobalArray[i] = tests[i];
         }
 
+        GlobalArray[testCount] = createDummy(type);
+        GlobalArray[testCount + 1] = nullptr;
+
         // For now enable full logging
         // FIXME: remove this when time sensitive WOPI
         // tests are fixed.
@@ -172,69 +216,63 @@ bool UnitBase::init([[maybe_unused]] UnitType type, [[maybe_unused]] const std::
 
         initTestSuiteOptions();
 
-        // Filter tests.
+        // Filter tests. GlobalIndex stays at the first test that matches, or at the dummy
+        // when none does, which is not started.
         GlobalIndex = 0;
         filter();
+        if (GlobalIndex == testCount && testCount > 0)
+            LOG_WRN("No test matches the filter [" << GlobalTestOptions.getFilter() << ']');
 
-        UnitBase* instance = GlobalArray[GlobalIndex];
+        UnitBase* instance = GlobalIndex < testCount ? GlobalArray[GlobalIndex] : nullptr;
         if (instance)
         {
             TST_LOG_NAME("UnitBase",
                          "Starting test #1: " << GlobalArray[GlobalIndex]->getTestname());
             instance->initialize();
 
-            if (instance && type == UnitType::Kit)
-            {
-                std::unique_lock<std::mutex> lock(TimeoutThreadMutex);
-                TimeoutThread = std::thread(
-                    [instance]
-                    {
-                        ProcUtil::setThreadName("unit timeout");
-
-                        std::unique_lock<std::mutex> lock2(TimeoutThreadMutex);
-                        if (TimeoutConditionVariable.wait_for(lock2,
-                                                              instance->_timeoutMilliSeconds,
-                                                              [] { return KitWorkFinished; }))
-                        {
-                            LOG_DBG(instance->getTestname() << ": Unit test finished in time");
-                        }
-                        else
-                        {
-                            LOG_ERR(instance->getTestname() << ": Unit test timeout after "
-                                                            << instance->_timeoutMilliSeconds);
-                            instance->timeout();
-                        }
-                    });
-            }
+            if (type == UnitType::Kit)
+                PendingKitTimeoutInstance = instance;
         }
     }
     else
 #endif // ENABLE_DEBUG
     {
         // Fallback.
-        GlobalArray = new UnitBase*[1 + 1]; // Dummy + null termination.
+        GlobalArray = new UnitBase*[1 + 1]{ createDummy(type), nullptr };
+        GlobalIndex = 0;
     }
 
-    // Dummy instance.
-    switch (type)
-    {
-        case UnitType::Wsd:
-            GlobalArray[testCount] = new UnitWSD("DummyUnitWSD");
-            break;
-        case UnitType::Kit:
-            GlobalArray[testCount] = new UnitKit("DummyUnitKit");
-            break;
-        case UnitType::Tool:
-            GlobalArray[testCount] = new UnitTool("DummyUnitTool");
-            break;
-        default:
-            assert(false);
-            break;
-    }
-
-    GlobalArray[testCount + 1] = nullptr;
-    GlobalIndex = 0;
     return GlobalArray[GlobalIndex] != nullptr;
+}
+
+void UnitBase::startKitTimeout()
+{
+#if ENABLE_DEBUG
+    UnitBase* const instance = PendingKitTimeoutInstance;
+    PendingKitTimeoutInstance = nullptr;
+    if (!instance)
+        return;
+
+    std::unique_lock<std::mutex> lock(TimeoutThreadMutex);
+    TimeoutThread = std::thread(
+        [instance]
+        {
+            ProcUtil::setThreadName("unit timeout");
+
+            std::unique_lock<std::mutex> lock2(TimeoutThreadMutex);
+            if (TimeoutConditionVariable.wait_for(lock2, instance->_timeoutMilliSeconds,
+                                                  [] { return KitWorkFinished; }))
+            {
+                LOG_DBG(instance->getTestname() << ": Unit test finished in time");
+            }
+            else
+            {
+                LOG_ERR(instance->getTestname() << ": Unit test timeout after "
+                                                << instance->_timeoutMilliSeconds);
+                instance->timeout();
+            }
+        });
+#endif // ENABLE_DEBUG
 }
 
 int UnitBase::uninit()

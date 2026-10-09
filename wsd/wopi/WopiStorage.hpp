@@ -64,7 +64,7 @@ public:
         const std::string& getPresentationLeader() const { return _presentationLeader; }
 
         // Public part
-        struct RelatedDocument
+        struct RemoteLink
         {
             /// The remote document's WOPISrc.
             std::string wopiSrc;
@@ -75,10 +75,13 @@ public:
             /// The time the remote document was last modified, as the
             /// integrator reported it. Empty when none was provided.
             std::string lastModifiedTime;
+            /// The persistent link the pages of the document record for the remote document,
+            /// from the PersistentLink of the entry.
+            std::string persistentLink;
         };
 
         // Private part
-        struct RelatedDocumentToken
+        struct RemoteLinkToken
         {
             /// The remote document's WOPISrc.
             std::string wopiSrc;
@@ -86,16 +89,16 @@ public:
             std::string accessToken;
         };
 
-        /// Remote documents this document may subscribe to, without tokens.
-        const std::vector<RelatedDocument>& getRelatedDocuments() const
+        /// Remote links this document may subscribe to, without tokens.
+        const std::vector<RemoteLink>& getRemoteLinks() const
         {
-            return _relatedDocuments;
+            return _remoteLinks;
         }
 
-        /// This view's access tokens for the related documents.
-        const std::vector<RelatedDocumentToken>& getRelatedDocumentTokens() const
+        /// This view's access tokens for the remote links.
+        const std::vector<RemoteLinkToken>& getRemoteLinkTokens() const
         {
-            return _relatedDocumentTokens;
+            return _remoteLinkTokens;
         }
 
         bool getUserCanWrite() const { return _userCanWrite; }
@@ -123,9 +126,11 @@ public:
         bool getEnableShare() const { return _enableShare; }
         bool getSupportsRename() const { return _supportsRename; }
         bool getSupportsLocks() const { return _supportsLocks; }
+        bool getSupportsLinkAccess() const { return _supportsLinkAccess; }
         bool getUserCanRename() const { return _userCanRename; }
         bool getUserCanOnlyComment() const { return _userCanOnlyComment; }
         bool getUserCanOnlyManageRedlines() const { return _userCanOnlyManageRedlines; }
+        bool getUserCanChangeSecurityLabel() const { return _userCanChangeSecurityLabel; }
         bool getIsUserRestricted() const { return _isUserRestricted; }
         const std::string& getRestrictedCommands() const { return _restrictedCommands; }
 
@@ -224,12 +229,18 @@ public:
         bool _supportsLocks = false;
         /// If WOPI host supports rename
         bool _supportsRename = false;
+        /// Whether the storage answers a POST to <WOPISrc>/linkaccess
+        bool _supportsLinkAccess = false;
         /// If user is allowed to rename the document
         bool _userCanRename = false;
         /// If user is limited to only writing/modifying comments
         bool _userCanOnlyComment = false;
         /// If user is limited to only managing redlines (accept/reject)
         bool _userCanOnlyManageRedlines = false;
+        /// If user may apply/change/remove the document's security label. Defaults to
+        /// true (absent host setting keeps today's behaviour); false locks the marking
+        /// while still allowing document editing.
+        bool _userCanChangeSecurityLabel = true;
         /// True when the host reports this user as one whose commands are restricted
         bool _isUserRestricted = false;
         /// Space separated UNO commands the host restricts for this user. A release build leaves
@@ -238,11 +249,11 @@ public:
         /// Used for directly starting follow me presentation
         std::string _presentationLeader;
 
-        /// The RelatedDocuments entries this document may subscribe to
-        std::vector<RelatedDocument> _relatedDocuments;
+        /// The RemoteLinks entries this document may subscribe to
+        std::vector<RemoteLink> _remoteLinks;
 
-        /// This view's access tokens for the related documents
-        std::vector<RelatedDocumentToken> _relatedDocumentTokens;
+        /// This view's access tokens for the remote links
+        std::vector<RemoteLinkToken> _remoteLinkTokens;
     };
 
     WopiStorage(const Poco::URI& uri, const std::string& localStorePath,
@@ -270,8 +281,8 @@ public:
 
     /// Update the locking state (check-in/out) of the associated file
     LockUpdateResult updateLockState(const Authorization& auth, LockContext& lockCtx,
-                                     StorageBase::LockState lock,
-                                     const Attributes& attribs) override;
+                                     StorageBase::LockState lock, const Attributes& attribs,
+                                     std::chrono::seconds timeout, SocketPoll* poller) override;
 
     void updateLockStateAsync(const Authorization& auth, LockContext& lockCtx, LockState lock,
                               const Attributes& attribs, const std::shared_ptr<SocketPoll>& socketPoll,
@@ -314,6 +325,8 @@ protected:
         /// storage. The lock token itself is of no use to us: we only ever hold
         /// one lock per document and we don't take over somebody else's.
         const bool hasWopiLockHeader;
+        /// The host's Retry-After, when it asked us to come back later.
+        const std::optional<std::chrono::seconds> retryAfter;
     };
 
     /// Handles the response from the server when uploading the document.
@@ -323,8 +336,10 @@ protected:
 private:
     /// Download the document from the given URI.
     /// Does not add authorization tokens or any other logic.
+    /// hostChecked is true when the host of uriObject passed the WOPI host check.
     std::string downloadDocument(const Poco::URI& uriObject, const std::string& uriAnonym,
-                                 const Authorization& auth, unsigned redirectLimit);
+                                 const Authorization& auth, unsigned redirectLimit,
+                                 bool hostChecked);
 
     /// Create the HTTP request for a WOPI Lock/Unlock operation.
     http::Request createLockRequest(const Poco::URI& uriObject, const Authorization& auth,

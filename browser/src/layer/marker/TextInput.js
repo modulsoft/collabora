@@ -390,15 +390,17 @@ window.L.TextInput = window.L.Layer.extend({
 	},
 
 	_wrapContent: function(content) {
-		var wrappedContent = this.hasAccessibilitySupport()
-			? '<span id="readable-content" aria-hidden="false">' + content + '</span>'
-			: content;
+		const escapedContent = app.LOUtil.escapeHtml(content);
+		const wrappedContent = this.hasAccessibilitySupport()
+			? '<span id="readable-content" role="presentation">' + escapedContent + '</span>'
+			: escapedContent;
 		return content.length === 0
 			? this._initialContent
 			: this._preSpaceChar + wrappedContent + this._postSpaceChar;
 	},
 
 	resetContent: function() {
+		// eslint-disable-next-line no-restricted-syntax -- fixed spacer markup
 		this._textArea.innerHTML = this._initialContent;
 	},
 
@@ -435,9 +437,11 @@ window.L.TextInput = window.L.Layer.extend({
 	update: function() {
 		if (this._container && this._map && app.file.textCursor.rectangle && app.activeDocument) {
 			var rect = app.file.textCursor.rectangle;
-			var pos = new cool.Point(
-				Math.round(rect.v1X / app.dpiScale),
-				Math.round(rect.v1Y / app.dpiScale)
+			// the container is fixed, so its position is relative to the viewport
+			const canvasRect = app.sectionContainer.getCanvasBoundingClientRect();
+			const pos = new cool.Point(
+				Math.round(canvasRect.left + rect.v1X / app.dpiScale),
+				Math.round(canvasRect.top + rect.v1Y / app.dpiScale)
 			);
 			this._setPos(pos);
 		}
@@ -560,7 +564,7 @@ window.L.TextInput = window.L.Layer.extend({
 		// Move and display under-caret marker
 
 		if (window.touch.currentlyUsingTouchscreen() && !app.activeDocument.activeView.hasTextSelection && this._cursorHandler) {
-			this._cursorHandler.setPosition(app.file.textCursor.rectangle.pX1, app.file.textCursor.rectangle.pY2 + (0 * app.dpiScale));
+			this._cursorHandler.moveUnderCaret();
 			this._cursorHandler.setShowSection(true);
 		} else if (this._cursorHandler) {
 			this._cursorHandler.setShowSection(false);
@@ -589,9 +593,13 @@ window.L.TextInput = window.L.Layer.extend({
 		this._map.fire('handlerstatus', {hidden: false});
 	},
 
+	// x of the editable's caret from its left edge
+	_getCaretOffsetX: function() {
+		return 0;
+	},
+
 	_setPos: function(pos) {
-		// the offset is needed since we have to move away from the edited text
-		// or double clicks for selecting text doesn't work properly
+		pos.x -= this._getCaretOffsetX();
 		if (window.L.Browser.cypressTest) {
 			// Some cypress tests require for the editable area to be as near as possible
 			// to the caret overlay when editing. In fact a synthetic mouse click on
@@ -601,8 +609,9 @@ window.L.TextInput = window.L.Layer.extend({
 			pos.x += 10;
 			pos.y += 10;
 		}
-		else {
-			pos.y += this._isDebugOn ? 50 : 200;
+		else if (this._isDebugOn) {
+			// keeps the visible debugging box off the text
+			pos.y += 50;
 		}
 		this._container.style.transform = 'translate(' + pos.x + 'px, ' + pos.y + 'px)';
 	},
@@ -1459,6 +1468,13 @@ window.L.TextInput = window.L.Layer.extend({
 	// start/end refer to the string represented by the whole plain text content
 	// it's not possible to set range start/end position at <img> delimiters
 	_setSelectionRange: function(start, end) {
+		// Putting the selection inside the contenteditable focuses it, so a
+		// cursor update must not run while the keyboard is on another widget.
+		const active = document.activeElement;
+		if (active && active !== document.body && active !== this._textArea &&
+			!this._textArea.contains(active))
+			return;
+
 		this._statusLog('_setSelectionRange [');
 		var selection = window.getSelection();
 		selection.removeAllRanges();

@@ -19,6 +19,8 @@
 
 #include "COOLWSD.hpp"
 
+#if !MOBILEAPP && ENABLE_DEBUG
+
 /* Default host used in the start test URI */
 #define COOLWSD_TEST_HOST "localhost"
 
@@ -30,6 +32,8 @@
 
 /* Page that lists the documents this server can open, and opens the one picked */
 #define COOLWSD_TEST_DOCUMENT_PICKER "/browser/" COOLWSD_VERSION_HASH "/documents.html"
+
+#endif
 
 /* Default ciphers used, when not specified otherwise */
 #define DEFAULT_CIPHER_SET "ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH"
@@ -198,10 +202,14 @@ extern "C"
     static void forwardSigUsr2();
 }
 
-void COOLWSD::appendAllowedHostsFrom(const LayeredConfiguration& conf, const std::string& root, std::vector<std::string>& allowed)
+void COOLWSD::appendAllowedHostsFrom(const LayeredConfiguration& conf, const std::string& root,
+                                     std::vector<std::string>& allowed, bool onlyAllowed)
 {
     for (const std::string& path : ConfigUtil::getIndexedKeys(conf, root, "host"))
     {
+        if (onlyAllowed && !conf.getBool(path + "[@allow]", false))
+            continue;
+
         std::string host = ConfigUtil::getConfigValue<std::string>(conf, path, "");
         if (!host.empty())
         {
@@ -414,9 +422,16 @@ void COOLWSD::checkDiskSpaceAndWarnClients(const bool cacheLastCheck)
 #endif
 }
 
+#if !MOBILEAPP
+static void closeSubForKit(const std::string& configId,
+                           const std::shared_ptr<ForKitProcess>& subForKit);
+#endif
+
 namespace {
 
-SubForKitMap::iterator dropSubForKit(SubForKitMap::iterator it)
+/// Forget a subforkit. With askToExit, it and its spare kits are asked to exit. Otherwise it is
+/// killed.
+SubForKitMap::iterator dropSubForKit(SubForKitMap::iterator it, bool askToExit)
 {
     // copy as it will be used after erase()
     std::string configId = it->first;
@@ -425,6 +440,12 @@ SubForKitMap::iterator dropSubForKit(SubForKitMap::iterator it)
     OutstandingForks.erase(configId);
     OutstandingSubForKitSpawns.erase(configId);
     LastSubForKitSpawnRequestTimes.erase(configId);
+#if !MOBILEAPP
+    if (askToExit)
+        closeSubForKit(configId, it->second);
+#else
+    (void)askToExit;
+#endif
     it = SubForKitProcs.erase(it);
     UNITWSD_CALL(killSubForKit(configId));
 
@@ -529,14 +550,14 @@ void COOLWSD::cleanupDocBrokers()
                 LOG_DBG("subforkit " << configId << " is unused, dropping it");
                 auto it = SubForKitProcs.find(configId);
                 assert(it != SubForKitProcs.end());
-                dropSubForKit(it);
+                dropSubForKit(it, /*askToExit=*/true);
             }
             else if (recentlyUsedKept >= MaxRecentlyUsedSubForKits)
             {
                 LOG_DBG("subforkit " << configId << " recently used but excess idle subforkit, dropping it");
                 auto it = SubForKitProcs.find(configId);
                 assert(it != SubForKitProcs.end());
-                dropSubForKit(it);
+                dropSubForKit(it, /*askToExit=*/true);
             }
             else
             {
@@ -1065,7 +1086,7 @@ std::shared_ptr<ChildProcess> getNewChild_Blocks(const std::shared_ptr<SocketPol
         if (it != SubForKitProcs.end())
         {
             LOG_WRN("subForKit " << configId << " failed to respond, resetting it");
-            dropSubForKit(it);
+            dropSubForKit(it, /*askToExit=*/false);
         }
     }
 
@@ -1281,6 +1302,42 @@ void COOLWSD::requestTerminateSpareKits()
     }
 }
 
+/// Ask the spare kits of a configuration to exit, then its subforkit. The subforkit is still their
+/// parent, so it reaps them and removes their jails before it exits itself.
+static void closeSubForKit(const std::string& configId,
+                           const std::shared_ptr<ForKitProcess>& subForKit)
+{
+    if (!PrisonerPoll)
+        return;
+
+    // The spare kits are taken now, so no document gets one of them, and the kits of a later
+    // subforkit with the same configuration stay.
+    std::vector<std::shared_ptr<ChildProcess>> spareKits;
+    {
+        std::unique_lock<std::mutex> lock(NewChildrenMutex);
+        for (auto it = NewChildren.begin(); it != NewChildren.end();)
+        {
+            if ((*it)->getConfigId() == configId)
+            {
+                spareKits.push_back(*it);
+                it = NewChildren.erase(it);
+            }
+            else
+                ++it;
+        }
+    }
+
+    // The sockets belong to the prisoner poll, so the messages are sent from its thread.
+    PrisonerPoll->addCallback(
+        [spareKits = std::move(spareKits), subForKit]
+        {
+            for (const std::shared_ptr<ChildProcess>& kit : spareKits)
+                kit->close();
+
+            subForKit->close();
+        });
+}
+
 namespace
 {
 
@@ -1336,6 +1393,12 @@ bool testLandlock()
                                   return Landlock::lock(std::vector<Landlock::Permission>()) ? 1
                                                                                              : 0;
                               }) == 1;
+}
+
+bool startWithLandlockJail()
+{
+    static const bool start = std::getenv("COOL_FORCE_LANDLOCK") != nullptr;
+    return start;
 }
 
 } // namespace
@@ -2086,7 +2149,9 @@ void COOLWSD::innerInitialize(Poco::Util::Application& self)
     // Setup the jails.
     bool UseMountNamespaces = true;
 
-    NoCapsForKit = Util::isKitInProcess() ||
+    RequireLandlock = startWithLandlockJail();
+
+    NoCapsForKit = startWithLandlockJail() || Util::isKitInProcess() ||
                    !ConfigUtil::getConfigValue<bool>(conf, "security.capabilities", true);
     if (NoCapsForKit && UseMountNamespaces)
     {
@@ -2275,7 +2340,7 @@ void COOLWSD::innerInitialize(Poco::Util::Application& self)
 #if !MOBILEAPP
     NoSeccomp =
         Util::isKitInProcess() || !ConfigUtil::getConfigValue<bool>(conf, "security.seccomp", true);
-    NoCapsForKit = Util::isKitInProcess() ||
+    NoCapsForKit = startWithLandlockJail() || Util::isKitInProcess() ||
                    !ConfigUtil::getConfigValue<bool>(conf, "security.capabilities", true);
     AdminEnabled = ConfigUtil::getConfigValue<bool>(conf, "admin_console.enable", true);
     IndirectionServerEnabled =
@@ -2551,6 +2616,13 @@ void COOLWSD::innerInitialize(Poco::Util::Application& self)
 
 void COOLWSD::setLokitEnvironmentVariables(const Poco::Util::LayeredConfiguration& conf)
 {
+#if MOBILEAPP
+    // The apps run the engine on the user's own machine, as the user, so every host the user
+    // can reach is a legitimate external data source, as in soffice. The allow-list below is
+    // for a shared server, whose kit must not fetch from the server's network on a document's
+    // behalf, so the apps set none and the engine's host filter stays off.
+    (void) conf;
+#else
     // Allowed hosts for being external data source in the documents
     std::vector<std::string> lokAllowedHosts;
     appendAllowedHostsFrom(conf, "net.lok_allow", lokAllowedHosts);
@@ -2562,7 +2634,7 @@ void COOLWSD::setLokitEnvironmentVariables(const Poco::Util::LayeredConfiguratio
     bool wopiAllowed = conf.getBool("storage.wopi[@allow]", false);
     if (wopiAllowed)
     {
-        appendAllowedHostsFrom(conf, "storage.wopi", lokAllowedHosts);
+        appendAllowedHostsFrom(conf, "storage.wopi", lokAllowedHosts, /*onlyAllowed=*/true);
         appendAllowedAliasGroups(conf, lokAllowedHosts);
     }
 
@@ -2586,16 +2658,13 @@ void COOLWSD::setLokitEnvironmentVariables(const Poco::Util::LayeredConfiguratio
 
         setenv("KIT_HOST_ALLOWLIST", allowlist.c_str(), true);
 
-#if !MOBILEAPP
         if (!ConfigUtil::getConfigValue<bool>(conf, "ssl.ssl_verification", true))
         {
             // also disable host verification for allowed hosts
             ::setenv("KIT_HOST_ALLOWLIST_EXEMPT_VERIFY_HOST", "1", true);
         }
-#endif
     }
 
-#if !MOBILEAPP
     setenv("KIT_ALLOWED_EXTREF_PATHS", "", true);
 #endif
 }
@@ -2938,7 +3007,7 @@ bool COOLWSD::checkAndRestoreForKit()
                 for (auto it = SubForKitProcs.begin(); it != SubForKitProcs.end(); )
                 {
                     LOG_DBG("dropping subforkit " << it->first);
-                    it = dropSubForKit(it);
+                    it = dropSubForKit(it, /*askToExit=*/false);
                 }
                 OutstandingSubForKitSpawns.clear();
                 LastSubForKitSpawnRequestTimes.clear();
@@ -3884,9 +3953,9 @@ std::shared_ptr<ServerSocket> COOLWSDServer::findServerPort()
 
     if (ClientPortNumber <= 0)
     {
-        // Avoid using the default port for unit-tests altogether.
-        // This avoids interfering with a running test instance.
-        ClientPortNumber = DEFAULT_CLIENT_PORT_NUMBER + (UnitWSD::isUnitTesting() ? 1 : 0);
+        // A unit test listens on a free port that the kernel picks, so no other process on the
+        // host knows its port.
+        ClientPortNumber = UnitWSD::isUnitTesting() ? 0 : DEFAULT_CLIENT_PORT_NUMBER;
     }
 
 #if ENABLE_SSL
@@ -3902,7 +3971,7 @@ std::shared_ptr<ServerSocket> COOLWSDServer::findServerPort()
 #if !MOBILEAPP
     const int firstPortNumber = ClientPortNumber;
 #endif
-    while (!socket &&
+    while (!socket && ClientPortNumber > 0 &&
 #ifdef BUILDING_TESTS
            true
 #else
@@ -3928,6 +3997,9 @@ std::shared_ptr<ServerSocket> COOLWSDServer::findServerPort()
                                                        << ClientPortNumber << "). Exiting");
         Util::forcedExit(EX_SOFTWARE);
     }
+
+    if (ClientPortNumber == 0)
+        ClientPortNumber = net::boundPort(socket->getFD());
 
     LOG_INF('#' << socket->getFD() << " Listening to client connections on port "
                 << ClientPortNumber);

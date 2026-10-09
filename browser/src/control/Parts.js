@@ -187,9 +187,22 @@ window.L.Map.include({
 			// in that case we cannot decrease previewRequestsOnFly counter
 			// we should not wait more than 2 seconds for each 3 requests
 			var now = new Date();
-			if (now - this._timeToEmptyQueue < 2000)
-				// wait until the queue is empty
+			const waited = now - this._timeToEmptyQueue;
+			if (waited < 2000) {
+				// wait until the queue is empty. A request may get no reply,
+				// so the queue is looked at again once the wait is over.
+				if (!this._previewQueueTimer) {
+					this._previewQueueTimer = app.timerRegistry.setTimeout(
+						'previewqueue',
+						() => {
+							this._previewQueueTimer = null;
+							this._processPreviewQueue();
+						},
+						2000 - waited,
+					);
+				}
 				return;
+			}
 			else {
 				this._previewRequestsOnFly = 0;
 				this._timeToEmptyQueue = now;
@@ -214,6 +227,16 @@ window.L.Map.include({
 
 		if (previewParts.length > 0)
 			window.app.console.debug('PREVIEW: request preview parts : ' + previewParts.join());
+	},
+
+	// A preview request under way has its answer, so the next one in the queue can go.
+	_previewRequestAnswered: function() {
+		this._previewRequestsOnFly--;
+		if (this._previewRequestsOnFly < 0) {
+			this._previewRequestsOnFly = 0;
+			this._timeToEmptyQueue = new Date();
+		}
+		this._processPreviewQueue();
 	},
 
 	_addPreviewToQueue: function(part, id, tileMsg) {
@@ -262,7 +285,8 @@ window.L.Map.include({
 			// For Impress/Draw, route thumbnails through the vector renderer.
 			// The slideshow path is using the server rendered bitmaps.
 			if (!isSlideshow && RenderManager.isVectorRendering()) {
-				RenderManager.requestThumbnail(id, part, maxWidth, maxHeight);
+				const vectorMode = app.activeDocument.activeModes[0];
+				RenderManager.requestThumbnail(id, part, vectorMode, maxWidth, maxHeight);
 			} else {
 				var mode = app.activeDocument.activeModes[0];
 				// The request names the part by its part identifier, so it

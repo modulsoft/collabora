@@ -282,12 +282,32 @@ public:
 
     const Util::Rectangle& getVisibleArea() const { return _clientVisibleArea; }
 
+    /// The identifier of the part this client is showing, empty when it has not said.
+    /// Writer documents have no parts and leave it empty.
+    const std::string& getClientSelectedPart() const { return _clientSelectedPart; }
+
     /// The zoom this client is showing at, as a percentage, or 0 when it has not said.
     int getClientZoomPercent() const { return _clientZoomPercent; }
 
     /// True while the client is in editing mode rather than viewing mode, and unset until
     /// the client has said which.
     std::optional<bool> getClientEditMode() const { return _clientEditMode; }
+
+    /// Where the text cursor of this view is, in document twips, empty until the kit says.
+    const Util::Rectangle& getClientCursor() const { return _clientCursor; }
+
+    /// The two ends of this view's text selection, in document twips.
+    const Util::Rectangle& getClientSelectionStart() const { return _clientSelectionStart; }
+    const Util::Rectangle& getClientSelectionEnd() const { return _clientSelectionEnd; }
+
+    /// The cell the cursor of this view is on, such as "D24". Empty in a document with no cells.
+    const std::string& getClientCellAddress() const { return _clientCellAddress; }
+
+    /// Tell the client, once, the zoom and the scroll offset the last view left.
+    void sendLastViewPosition(const std::shared_ptr<DocumentBroker>& docBroker);
+
+    /// Put the cursor and any selection back where the last view of this document had them.
+    void restoreLastViewSelection(const std::shared_ptr<DocumentBroker>& docBroker);
     /// Visible area can have negative value as position, but we have tiles only in the positive range
     Util::Rectangle getNormalizedVisibleArea() const;
 
@@ -331,7 +351,7 @@ public:
 
 #if !MOBILEAPP
     /// Takes the source documents named by the slide links the document reports, so that a
-    /// source the storage listed no related document for is still known by its name.
+    /// source the storage listed no remote link for is still known by its name.
     void recordSlideLinkSources(const std::shared_ptr<Message>& payload,
                                 const std::shared_ptr<DocumentBroker>& docBroker);
 #endif // !MOBILEAPP
@@ -363,15 +383,15 @@ public:
     void rotateClipboardKey(bool notifyClient);
 
     /// Generate a fresh one-time token that authorizes a POST to
-    /// /cool/relateddocument for this view, sending it to the client when
+    /// /cool/links for this view, sending it to the client when
     /// notifyClient is set. Each accepted POST consumes and rotates it.
-    void rotateRelatedDocumentToken(bool notifyClient);
+    void rotateLinkToken(bool notifyClient);
 
-    /// True when the given token is this view's current related document POST
+    /// True when the given token is this view's current link POST
     /// token, and not empty.
-    bool matchesRelatedDocumentToken(const std::string& token) const
+    bool matchesLinkToken(const std::string& token) const
     {
-        return !token.empty() && token == _relatedDocumentToken;
+        return !token.empty() && token == _linkToken;
     }
 
     /// Generate an access token for this session via proxy protocol.
@@ -421,6 +441,8 @@ public:
 
     void uploadViewSettingsToWopiHost();
 
+    void uploadServerPrivateInfoToWopiHost();
+
     /// Resolve AI credentials with precedence:
     ///   viewSettings[aiProviderAPIKey|Model|URL]
     ///   -> userPrivateInfoObj[AIProviderAPIKey|Model|URL]
@@ -467,10 +489,20 @@ public:
 #endif
 
 private:
+    /// The value of one AI setting: the user's view setting, else their user private info, which is
+    /// then copied into the view settings, else the coolwsd.xml value.
+    std::string resolveAISetting(Poco::JSON::Object::Ptr& viewSettings,
+                                 const Poco::JSON::Object::Ptr& userPrivateInfoObj,
+                                 bool& viewSettingsMutated, const std::string& vsKey,
+                                 const std::string& upiKey, const std::string& cfgKey) const;
+
     std::shared_ptr<ClientSession> client_from_this()
     {
         return std::static_pointer_cast<ClientSession>(shared_from_this());
     }
+
+    void uploadSettingsToWopiHost(const std::string& filePath, const std::string& jsonBody,
+                                  const std::string& settingName);
 
     /// SocketHandler: disconnection event.
     void onDisconnect() override;
@@ -595,8 +627,8 @@ private:
     std::string _proxyAccess;
 
     /// The current one-time token that authorizes a POST to
-    /// /cool/relateddocument for this view. Empty until the first is generated.
-    std::string _relatedDocumentToken;
+    /// /cool/links for this view. Empty until the first is generated.
+    std::string _linkToken;
 
     /// Store last sent payload of form field button, so we can filter out redundant messages.
     std::string _lastSentFormFielButtonMessage;
@@ -665,6 +697,21 @@ private:
     /// True while the client is in editing mode. The client says which mode it is in when
     /// its page has loaded and again on each change, so this stays unset until then.
     std::optional<bool> _clientEditMode;
+
+    /// True once this session has been put where the last view of the document was.
+    bool _restoredLastViewPosition;
+
+    /// Where the text cursor of this view is, in document twips.
+    Util::Rectangle _clientCursor;
+
+    /// The two ends of this view's text selection, in document twips.
+    Util::Rectangle _clientSelectionStart;
+    Util::Rectangle _clientSelectionEnd;
+
+    std::string _clientCellAddress;
+
+    /// Read a "x, y, width, height" rectangle in twips. False when the text is not one.
+    static bool parseRectangle(const std::string& text, Util::Rectangle& rectangle);
 
     /// The integer id of the view in the Kit process
     int _kitViewId;

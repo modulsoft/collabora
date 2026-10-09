@@ -93,6 +93,13 @@
 		background-color: #e9e9ed;
 	}
 
+	/* Cleanup deck: the badge on a row says what it is through a background colour, which
+	   forced colours drops, so it gets a border of a system colour and still reads as a
+	   shape. */
+	.cleanup-row-saving {
+		border: 1px solid ButtonBorder;
+	}
+
 	/* Dark mode: invert hardcoded light backgrounds for icon visibility */
 	[data-theme='dark'] .unobutton img,
 	[data-theme='dark'] .savemodified.unotoolbutton .unobutton img,
@@ -149,6 +156,13 @@
 		background-color: ButtonText !important;
 		-webkit-mask: var(--icon-url) no-repeat center / contain;
 		mask: var(--icon-url) no-repeat center / contain;
+	}
+
+	/* The submenu arrow is a mask painted in background-color, and the colour
+	   forced on that property is the surface it sits on, so it vanishes. */
+	.ui-combobox-entry.ui-has-menu::after {
+		forced-color-adjust: none;
+		background-color: CanvasText !important;
 	}
 
 }

@@ -21,6 +21,7 @@
 #include <net/HttpRequest.hpp>
 #include <net/NetUtil.hpp>
 
+#include <Poco/Exception.h>
 #include <Poco/URI.h>
 
 #include <memory>
@@ -39,6 +40,7 @@ inline void sendError(http::StatusCode errorCode, const std::shared_ptr<StreamSo
     oss << "HTTP/1.1 " << errorCode << "\r\n"
            "Date: " << Util::getHttpTimeNow() << "\r\n"
            "Content-Length: " << body.size() << "\r\n"
+           "X-Content-Type-Options: nosniff\r\n"
         << extraHeader << "\r\n"
         << body;
     socket->send(oss.str());

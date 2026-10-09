@@ -77,6 +77,8 @@ const Util::UnorderedStringMap<std::string> DefAppConfig = {
     { "ai.image_model", "" },
     { "ai.image_size", "" },
     { "ai.model", "" },
+    { "ai.show_ai_notebookbar", "false" },
+    { "ai.show_ai_sidebar", "false" },
     { "allowed_languages", "de_DE en_GB en_US es_ES fr_FR it nl pt_BR pt_PT ru" },
     { "allow_update_popup", "true" },
     { "browser_logging", "false" },
@@ -322,6 +324,13 @@ static Util::UnorderedStringMap<std::string> buildDefaultAppConfig()
     config.emplace("accessibility.enable", Util::isMobileApp() ? "true" : "false");
     if (!Util::isMobileApp())
         config.insert(DefServerConfig.begin(), DefServerConfig.end());
+    else
+    {
+        // The embedded app talks to its own kit over a loopback connection that carries no
+        // certificate, so it serves plain HTTP.
+        config.insert_or_assign("ssl.enable", "false");
+        config.insert_or_assign("ssl.termination", "false");
+    }
     return config;
 }
 

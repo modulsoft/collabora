@@ -106,6 +106,7 @@ Util::LoadTimings KitLoadTimings;
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -116,6 +117,7 @@ Util::LoadTimings KitLoadTimings;
 
 #include <Poco/File.h>
 #include <Poco/Exception.h>
+#include <Poco/Path.h>
 #include <Poco/URI.h>
 
 #ifdef QTAPP
@@ -136,6 +138,7 @@ Util::LoadTimings KitLoadTimings;
 #endif
 
 #ifdef QTAPP
+#include <qt/QtClipboard.hpp>
 #include <qt/QtFileManager.hpp>
 #include <qt/QtFilePicker.hpp>
 #endif
@@ -296,6 +299,24 @@ namespace
     std::string UserDirPath;
     std::string InstDirPath;
 
+    /// The name the client's per-document-type preferences are keyed by.
+    std::string_view docTypeName(COKitDocumentType type)
+    {
+        switch (type)
+        {
+            case COKitDocumentType::TEXT:
+                return "text";
+            case COKitDocumentType::SPREADSHEET:
+                return "spreadsheet";
+            case COKitDocumentType::PRESENTATION:
+                return "presentation";
+            case COKitDocumentType::DRAWING:
+                return "drawing";
+            default:
+                return std::string_view();
+        }
+    }
+
     std::string pathFromFileURL(const std::string &uri)
     {
         const std::string decoded = Uri::decode(uri);
@@ -387,7 +408,7 @@ namespace
                    path != std::string_view("sdk") &&
                    path != std::string_view("debugsource") &&
                    path != std::string_view("share/basic") &&
-                   !std::string_view(path).starts_with(std::string_view("share/extensions/dict")) &&
+                   !std::string_view(path).starts_with(std::string_view("share/dictionaries/dict")) &&
                    path != std::string_view("share/Scripts/java") &&
                    path != std::string_view("share/Scripts/javascript") &&
                    path != std::string_view("share/config/wizard") &&
@@ -1109,13 +1130,14 @@ void Document::renderTiles(TileCombined &tileCombined)
     if (tileCombined.getCanonicalViewId() != CanonicalViewId::None)
         _loKitDocument->setView(session->getViewId());
 
-    // In a presentation or drawing document a tile's part is the page's GUID,
-    // and the document resolves it to the index the page holds when it paints.
-    // The identifier of a gone page paints nothing, so there is nothing to
-    // render or send.
+    // In a presentation or drawing document a tile's part is the page's GUID, and the document
+    // resolves it to the index the page holds when it paints. The identifier of a gone page paints
+    // nothing, so each tile is reported back as gone instead of rendered.
     if (_loKitDocument->getPartIndex(tileCombined.getPart().c_str(), tileCombined.getEditMode()) < 0)
     {
         LOG_DBG("Skipping the render of the gone part " << tileCombined.getPart());
+        for (const TileDesc& tile : tileCombined.getTiles())
+            sendTextFrame(tile.serialize("tilegone:"));
         return;
     }
 
@@ -1370,23 +1392,32 @@ void Document::trimAfterInactivity()
         return;
     }
 
-    // The core already delivers this to every view that needs it: either
-    // naturally, since each view's own window reacts to the same document
-    // change and reports its own invalidation, or explicitly, when a change
-    // is not tied to any one view's zoom and the core calls back once per
-    // view on purpose. Broadcasting it to every session here on top of that
-    // duplicated the delivery, and in Calc, where the affected area is in
-    // per-view zoomed screen coordinates, delivered one view's rectangle to
-    // views it did not apply to.
-    queue->putCallback(descriptor->getViewId(), eType, payload);
+    if (eType == COKitCallbackType::VECTOR_PRIMITIVES_DELTA)
+    {
+        // The delta describes the part and carries no view state, so one frame goes to every
+        // session.
+        if (Document* document = descriptor->getDoc())
+            document->broadcastCallbackToClients(eType, payload);
+    }
+    else
+    {
+        // The core already delivers this to every view that needs it: either
+        // naturally, since each view's own window reacts to the same document
+        // change and reports its own invalidation, or explicitly, when a change
+        // is not tied to any one view's zoom and the core calls back once per
+        // view on purpose. Broadcasting it to every session here on top of that
+        // duplicated the delivery, and in Calc, where the affected area is in
+        // per-view zoomed screen coordinates, delivered one view's rectangle to
+        // views it did not apply to.
+        queue->putCallback(descriptor->getViewId(), eType, payload);
+    }
 
     LOG_TRC("Document::ViewCallback end.");
 }
 
 /// Load a document (or view) and register callbacks.
 bool Document::onLoad(const std::string& sessionId,
-                      const std::string& uriAnonym,
-                      const std::string& renderOpts)
+                      const std::string& uriAnonym)
 {
     LOG_INF("Loading url [" << uriAnonym << "] for session [" << sessionId <<
             "] which has " << (_sessions.size() - 1) << " sessions.");
@@ -1404,7 +1435,7 @@ bool Document::onLoad(const std::string& sessionId,
     std::shared_ptr<ChildSession> session = it->second;
     try
     {
-        if (load(session, renderOpts))
+        if (load(session))
         {
             if (_legacyUnoApiSeen &&
                 !ConfigUtil::getBool("hide_legacy_script_warning", false))
@@ -1722,6 +1753,14 @@ bool Document::forkToSave(const std::function<void()>& childSave, int viewId,
     Log::preFork();
 
     const pid_t pid = fork();
+
+    if (pid < 0)
+    {
+        // Both socket ends and the thread guard go out of scope here, so the sockets
+        // close and the engine threads restart.
+        LOG_SYS("Failed to fork the background save process");
+        return false;
+    }
 
     if (!pid) // Child
     {
@@ -2204,8 +2243,7 @@ std::string removeServerLoadOptions(const std::string& filterOptions,
 }
 }
 
-std::shared_ptr<COKitDocument> Document::load(const std::shared_ptr<ChildSession>& session,
-                                              const std::string& renderOpts)
+std::shared_ptr<COKitDocument> Document::load(const std::shared_ptr<ChildSession>& session)
 {
     const std::string sessionId = session->getId();
 
@@ -2287,6 +2325,7 @@ std::shared_ptr<COKitDocument> Document::load(const std::shared_ptr<ChildSession
 
     std::string spellOnline = session->getSpellOnline();
     const std::string formattingMarks = session->getFormattingMarks();
+    const std::string focusRingColor = session->getFocusRingColor();
     if (!_loKitDocument)
     {
         // This is the first time we are loading the document
@@ -2407,10 +2446,6 @@ std::shared_ptr<COKitDocument> Document::load(const std::shared_ptr<ChildSession
             return nullptr;
         }
 
-        // Only save the options on opening the document.
-        // No support for changing them after opening a document.
-        _renderOpts = renderOpts;
-
         // Whether the document carries a separate password required to modify it.
         const std::string hasPasswordToModify(
             _loKitDocument->getCommandValues(".uno:HasPasswordToModify"));
@@ -2470,17 +2505,24 @@ std::shared_ptr<COKitDocument> Document::load(const std::shared_ptr<ChildSession
             break;
         }
     }
+
+    // Which document type's spell checking choice applies is only known now that
+    // the document is loaded. A choice already narrowed to the document's own
+    // state above names no document type, so it passes through untouched.
+    spellOnline = Session::spellOnlineForDocType(spellOnline,
+                                                 docTypeName(_loKitDocument->getDocumentType()));
+
     std::string theme = getDefaultTheme(session);
 
     std::string backgroundTheme = getDefaultBackgroundTheme(session);
 
     // Avoid logging userPrivateInfo till it's not anonymized.
     LOG_INF("Initializing for rendering session [" << sessionId << "] on document url [" <<
-            anonymizeUrl(_url) << "] with: [" << makeRenderParams(_renderOpts, userNameAnonym, spellOnline, formattingMarks, theme, backgroundTheme, "") << "].");
+            anonymizeUrl(_url) << "] with: [" << makeRenderParams(userNameAnonym, spellOnline, formattingMarks, theme, backgroundTheme, focusRingColor, "") << "].");
 
     // initializeForRendering() should be called before
     // registerCallback(), as the previous creates a new view in Impress.
-    const std::string renderParams = makeRenderParams(_renderOpts, userName, spellOnline, formattingMarks, theme, backgroundTheme, userPrivateInfo);
+    const std::string renderParams = makeRenderParams(userName, spellOnline, formattingMarks, theme, backgroundTheme, focusRingColor, userPrivateInfo);
 
     _loKitDocument->initializeForRendering(renderParams.c_str());
 
@@ -2652,25 +2694,14 @@ bool Document::forwardToChild(const std::string_view prefix, const std::vector<c
     return false;
 }
 
-/* static */ std::string Document::makeRenderParams(const std::string& renderOpts, const std::string& userName,
+/* static */ std::string Document::makeRenderParams(const std::string& userName,
                                                     const std::string& spellOnline,
                                                     const std::string& formattingMarks, const std::string& theme,
                                                     const std::string& backgroundTheme,
+                                                    const std::string& focusRingColor,
                                                     const std::string& userPrivateInfo)
 {
-    Object::Ptr renderOptsObj;
-
-    // Fill the object with renderoptions, if any
-    if (!renderOpts.empty())
-    {
-        Parser parser;
-        Poco::Dynamic::Var var = parser.parse(renderOpts);
-        renderOptsObj = var.extract<Object::Ptr>();
-    }
-    else
-    {
-        renderOptsObj = new Object();
-    }
+    Object::Ptr renderOptsObj = new Object();
 
     Object::Ptr userPrivateInfoObj;
     if (!userPrivateInfo.empty())
@@ -2696,6 +2727,11 @@ bool Document::forwardToChild(const std::string_view prefix, const std::vector<c
     {
         // userName must be decoded already.
         renderOptsObj->set(".uno:Author", makePropertyValue("string", userName));
+    }
+
+    if (!focusRingColor.empty())
+    {
+        renderOptsObj->set(".uno:FocusRingColor", makePropertyValue("string", focusRingColor));
     }
 
     // Extract settings relevant as view options from userPrivateInfo.
@@ -2810,6 +2846,30 @@ bool Document::processInputEnabled() const
     return enabled;
 }
 
+void Document::deliverVectorDelta(const std::string& payload)
+{
+    // A background save forwards only text messages to the process that forked it, so it
+    // sends no content of its own.
+    if (isBackgroundSaveProcess())
+        return;
+
+    // Every session reads the same delta, so it is compressed once, for the first session that
+    // takes it, and the frame is handed to each of them. A session that draws bitmap tiles has
+    // no use for it. An inactive or disconnected session is sent no delta.
+    std::optional<std::vector<char>> frame;
+    for (const auto& it : _sessions)
+    {
+        ChildSession& session = *it.second;
+        if (session.isCloseFrame() || session.isDisconnected() || !session.isActive() ||
+            !session.isVectorRendering())
+            continue;
+        if (!frame)
+            frame = ChildSession::zstdFrame("zstdvectorprimitivesdelta:\n", payload.data(),
+                                            payload.size());
+        session.sendVectorDelta(*frame, payload);
+    }
+}
+
 void Document::drainCallbacks()
 {
     KitQueue::Callback cb;
@@ -2831,6 +2891,12 @@ void Document::drainCallbacks()
 
         const COKitCallbackType eType = cb._type;
         const std::string &payload = cb._payload;
+
+        if (eType == COKitCallbackType::VECTOR_PRIMITIVES_DELTA)
+        {
+            deliverVectorDelta(payload);
+            continue;
+        }
 
         // Forward the callback to the same view, demultiplexing is done by the CollaboraOffice core.
         bool isFound = false;
@@ -3122,7 +3188,7 @@ void Document::dumpState(std::ostream& oss)
            "\n\tpid: " << ProcUtil::getProcessId() << "\n\tstop: " << _stop
         << "\n\tjailId: " << _jailId << "\n\tdocKey: " << _docKey << "\n\tdocId: " << _docId
         << "\n\turl: " << _url << "\n\tobfuscatedFileId: " << _obfuscatedFileId
-        << "\n\tjailedUrl: " << anonymizeUrl(_jailedUrl) << "\n\trenderOpts: " << _renderOpts
+        << "\n\tjailedUrl: " << anonymizeUrl(_jailedUrl)
         << "\n\thaveDocPassword: " << _haveDocPassword // not the pwd itself
         << "\n\tisDocPasswordProtected: " << _isDocPasswordProtected
         << "\n\tdocPasswordType: " << int(_docPasswordType)
@@ -3333,34 +3399,6 @@ void KitSocketPoll::dumpGlobalState(std::ostream& oss) // static
     }
     else
         oss << "KitSocketPoll: none\n";
-}
-
-bool KitSocketPoll::scheduleOnKitThread(unsigned mobileAppDocId, const CallbackFn& fn) // static
-{
-#if DOCS_SHARE_PROCESS
-    // Several documents share this process, each with a poll in KSPolls.
-    // getMainPoll() tracks only the last-built poll and is cleared by any
-    // poll's destructor, so it can be null while live polls remain. Pick the
-    // document's own poll: the kit thread services every poll in the set, so
-    // the callback still runs on it, and it is dropped only if this document
-    // closes rather than an unrelated one.
-    std::unique_lock<std::mutex> lock(KSPollsMutex);
-    for (const auto& weak : KSPolls)
-    {
-        if (auto p = weak.lock())
-        {
-            const std::shared_ptr<Document>& doc = p->getDocument();
-            if (doc && doc->getMobileAppDocId() == mobileAppDocId)
-                // Holding the shared_ptr keeps the poll alive across addCallback.
-                return p->addCallback(fn);
-        }
-    }
-    return false;
-#else
-    // One document per kit process, so its single poll is the one to use.
-    (void)mobileAppDocId;
-    return mainPoll && mainPoll->addCallback(fn);
-#endif
 }
 
 std::shared_ptr<KitSocketPoll> KitSocketPoll::create() // static
@@ -3703,7 +3741,8 @@ void downloadAsFileSaveDialogCallback(const char* suggestedURI, char* result, si
     // No chroot, no jail. Use a tmp dir that the embedding app process can
     // read for the deferred picker step.
     std::error_code ec;
-    const std::string baseDir = std::filesystem::temp_directory_path(ec).string() + "/cool-export/";
+    const std::string baseDir = std::filesystem::temp_directory_path(ec).string<char>()
+        + "/cool-export/";
     std::filesystem::create_directories(baseDir, ec);
     if (ec)
     {
@@ -3796,9 +3835,8 @@ static void startMainLoop(const COKit* kit, const std::shared_ptr<COKit>& loKit,
 #endif
 
     // The desktop apps use one process-shared clipboard, so closing a document
-    // does not have to serialize the clipboard onto the system clipboard. Qt
-    // keeps its own per-view provider for now.
-#if defined(MACOSAPP) || defined(_WIN32)
+    // does not have to serialize the clipboard onto the system clipboard.
+#if defined(MACOSAPP) || defined(_WIN32) || defined(QTAPP)
     install_clipboard_provider(*loKit);
 #endif
 

@@ -247,6 +247,12 @@ void NetUtilWhiteBoxTests::testParseUri()
 
     // Malformed: an unterminated bracket is rejected.
     LOK_ASSERT(!net::parseUri("[::1", scheme, host, port));
+
+    // User information in the authority is rejected, and an '@' in the path is not.
+    LOK_ASSERT(!net::parseUri("https://user@domain.com", scheme, host, port));
+    LOK_ASSERT(!net::parseUri("https://user:secret@domain.com:88/path", scheme, host, port));
+    LOK_ASSERT(net::parseUri("https://domain.com/path/@file", scheme, host, port));
+    LOK_ASSERT_EQUAL_STR("domain.com", host);
 }
 
 void NetUtilWhiteBoxTests::testParseUriUrl()
@@ -425,6 +431,16 @@ void NetUtilWhiteBoxTests::testIpNetwork()
     LOK_ASSERT(slash12->contains("172.31.255.254"));
     LOK_ASSERT(!slash12->contains("172.15.255.255"));
     LOK_ASSERT(!slash12->contains("172.32.0.0"));
+
+    // A part with a leading zero is not dotted decimal.
+    std::optional<Util::IpNetwork> testNet = Util::IpNetwork::parse("192.0.2.0/24");
+    LOK_ASSERT(testNet.has_value());
+    LOK_ASSERT(testNet->contains("192.0.2.1"));
+    LOK_ASSERT(testNet->contains("192.0.2.0"));
+    LOK_ASSERT(!testNet->contains("192.0.02.1"));
+    LOK_ASSERT(!testNet->contains("192.0.2.01"));
+    LOK_ASSERT(!testNet->contains("::ffff:192.0.2.01"));
+    LOK_ASSERT(!Util::IpNetwork::parse("192.0.02.0/24").has_value());
 
     // Single host and match-all.
     std::optional<Util::IpNetwork> single = Util::IpNetwork::parse("203.0.113.7/32");

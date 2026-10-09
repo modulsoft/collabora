@@ -26,11 +26,17 @@ describe(['tagmultiuser'], 'Joining a document should not trigger an invalidatio
 		// Turn off SpellChecking by default because grammar checking,
 		// when available, currently adds an extra empty update when
 		// grammar checking kicks in at server-side idle after a change.
-		localStorage.setItem('spellOnline', false);
+		localStorage.setItem('text.spellOnline', false);
 		helper.setupAndLoadDocument('writer/invalidations.odt',
 																/* skipDocumentCheck */ true,
 																/* isMulti */ true);
 		desktopHelper.switchUIToNotebookbar();
+		cy.getFrameWindow('#iframe1').then(function(win) {
+			this.win1 = win;
+		});
+		cy.getFrameWindow('#iframe2').then(function(win) {
+			this.win2 = win;
+		});
 	});
 
 	it.skip('Join document', function() {
@@ -39,9 +45,10 @@ describe(['tagmultiuser'], 'Joining a document should not trigger an invalidatio
 		cy.cGet('#toolbar-down #StateWordCount').should('have.text', '0 words, 0 characters');
 
 		ceHelper.type('X');
-		cy.wait(1000);
+		helper.processToIdle(this.win1);
 
 		cy.cSetActiveFrame('#iframe2');
+		helper.processToIdle(this.win2);
 		waitForInit(false);
 		cy.cGet('#toolbar-down #StateWordCount').should('have.text', '1 word, 1 character');
 
@@ -53,9 +60,7 @@ describe(['tagmultiuser'], 'Joining a document should not trigger an invalidatio
 			const beforeCount = $before.text();
 
 			// joining triggered a theme related invalidation
-			cy.cSetActiveFrame('#iframe2');
-			cy.get('#form2').submit();
-			cy.wait(1000);
+			helper.reloadFrameAndWaitForNewPage('#iframe2', '#form2');
 
 			cy.cSetActiveFrame('#iframe1');
 			writerHelper.selectAllTextOfDoc();
@@ -73,9 +78,10 @@ describe(['tagmultiuser'], 'Joining a document should not trigger an invalidatio
 		cy.cGet('#toolbar-down #StateWordCount').should('have.text', '0 words, 0 characters');
 
 		ceHelper.type('X');
-		cy.wait(1000);
+		helper.processToIdle(this.win1);
 
 		cy.cSetActiveFrame('#iframe2');
+		helper.processToIdle(this.win2);
 		waitForInit(false);
 		cy.cGet('#toolbar-down #StateWordCount').should('have.text', '1 word, 1 character');
 
@@ -92,12 +98,7 @@ describe(['tagmultiuser'], 'Joining a document should not trigger an invalidatio
 			cy.cGet('.notebookbar-shortcuts-bar .unoSave > button').click();
 
 			// Reload page
-			cy.cSetActiveFrame('#iframe2');
-			cy.get('#form2').submit();
-			// Wait for page to unload
-			cy.wait(1000);
-			// Wait for page to finish loading
-			helper.documentChecks(true);
+			helper.reloadFrameAndWaitForNewPage('#iframe2', '#form2');
 
 			cy.cSetActiveFrame('#iframe1');
 			writerHelper.selectAllTextOfDoc();
@@ -105,7 +106,7 @@ describe(['tagmultiuser'], 'Joining a document should not trigger an invalidatio
 			cy.cGet('#toolbar-down #StateWordCount').should('have.text', '1 word, 1 character');
 
 			ceHelper.type('X');
-			cy.wait(1000);
+			helper.processToIdle(this.win1);
 
 			cy.cGet('#toolbar-down #StateWordCount').should('have.text', '1 word, 2 characters');
 

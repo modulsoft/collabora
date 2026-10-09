@@ -191,6 +191,14 @@ window.L.Map = window.L.Evented.extend({
 				this._fireInitComplete('CharFontName');
 			}
 		});
+		this.on('commandstatechanged', function(e) {
+			if (e.commandName === '.uno:CharFontName')
+				this._updateMissingFontMark(e.state);
+		});
+		this.on('updatetoolbarcommandvalues', function(e) {
+			if (e.commandName === '.uno:CharFontName')
+				this._updateMissingFontMark(this._getCurrentFontName());
+		});
 		if (window.ThisIsTheAndroidApp) {
 			this.on('readonlymode', function() {
 				this.setPermission('readonly');
@@ -343,7 +351,11 @@ window.L.Map = window.L.Evented.extend({
 				var dt = this.getDocType();
 				if (this.uiManager && e.commandValues &&
 				    (dt === 'text' || dt === 'spreadsheet' || dt === 'presentation')) {
-					var supported = !!e.commandValues.supported;
+					// The host can lock the marking per file/user (UserCanChangeSecurityLabel):
+					// then the command is hidden like an unsupported format -- the banner still
+					// shows the classification. wsd also drops the command, so this is only UX.
+					var canChange = !this['wopi'] || this['wopi'].UserCanChangeSecurityLabel;
+					var supported = !!e.commandValues.supported && canChange;
 					// What the notebookbar was last built with: its builders read
 					// _securityLabelSupported, so this is the layout on screen.
 					var wasSupported = this._securityLabelSupported === true;
@@ -644,8 +656,6 @@ window.L.Map = window.L.Evented.extend({
 				this._modTimeout = setTimeout(window.L.bind(this.updateModificationIndicator, this, -1), timeout);
 			}
 		}
-		if (this.lastModIndicator !== null && this.lastModIndicator !== undefined)
-			this.lastModIndicator.innerHTML = dateValue;
 		this.setLastModDateValue(dateValue);
 		this._modTimeout = setTimeout(window.L.bind(this.updateModificationIndicator, this, -1), timeout);
 	},

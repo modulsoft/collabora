@@ -105,6 +105,22 @@ ui.json:
   is optional and shown on a notebookbar button or dropdown entry that references
   this command - the classic menu never renders it.
 
+- `contributes.extensionsMenu` offers commands under the extension's own name, in the
+  Extensions menu and as a dropdown in the Extensions notebookbar tab, in the order
+  given:
+
+  ```json
+  "extensionsMenu": [
+    { "command": "insertDate" },
+    { "separator": true },
+    { "command": "about" }
+  ]
+  ```
+
+  For an extension whose commands are its whole user interface. An extension that
+  wants its commands in a document menu of its own choosing uses `menus` below
+  instead; the two are independent, and a command may appear in both.
+
 - `contributes.menus` maps an existing top-level classic-menu id (`file`, `editmenu`,
   `view`, `insert`, `format`, and so on, depending on the document type) to a list of
   command ids appended to the end of that menu.
@@ -279,6 +295,75 @@ native save panel in the desktop app (CODA). `content` is a string (text) or a
 saved (`"download"`, `"filesystem"`). Only the base name of `filename` is used.
 
     await cool.saveFile('picture.svg', svgText, 'image/svg+xml');
+
+## Google Apps Script add-ons
+
+A directory holding an `appsscript.json` instead of a `manifest.json` is a
+Google Apps Script editor add-on, and COOL runs it without any file of ours
+added to it. Discovery synthesizes the manifest such a directory has no room
+for: the name comes from
+a `setTitle("...")` call or an `APP_TITLE`-style constant in the sources, and
+the target document types come from which of `DocumentApp`, `SpreadsheetApp`
+and `SlidesApp` the sources mention.
+
+The pieces:
+
+| File | Role |
+|---|---|
+| `gas-wrapper.html` | The page loaded into a sidebar panel. It fetches the add-on's server sources and grafts the requested HTML into itself, expanding `<?!= include('name') ?>`. |
+| `gas-shim.js` | Client half. Exposes `google.script.run` as a Proxy, so a leaf call ships the kit half through `cool.callRemote`. |
+| `gas-kit-runner.js` | Kit half. Shims a subset of the Apps Script services on top of scriptinterop, then calls the named function. |
+
+An Apps Script project keeps its server code in `.gs` files in the web editor,
+which clasp writes out as `.js` on disk. Either is picked up; where a directory
+has both, the `.gs` files are taken as the project's and a `.js` is left to the
+sidebar to load in the browser.
+
+### Menu-driven add-ons
+
+An add-on's `onOpen()` builds its menu by calling `createAddonMenu().addItem(...)`.
+Extension load asks the runner for that menu through the reserved name
+`__coolGasMenu`, which runs `onOpen()` and returns the items its
+`createAddonMenu()` built. Each item becomes a contributed command placed in
+`contributes.extensionsMenu`. The add-on's items then sit under its own name in
+the Extensions menu and in the Extensions notebookbar tab, where an editor
+add-on's menu belongs.
+
+Choosing an item ships the runner, the add-on's sources and a call to the item's
+function to the kit as one `executescript` message, the same way any contributed
+command runs. Messages the add-on passes to `getUi().alert()` then arrive as a
+snackbar.
+
+### What the shims cover
+
+`DocumentApp` and `SpreadsheetApp` (documents, sheets, ranges, the active
+selection and cursor), `HtmlService`, `PropertiesService.getUserProperties`
+(stored in the iframe's `localStorage`), `LanguageApp.translate`, `Session`,
+`Utilities` and `Logger`.
+
+`getUi().alert()` records its message rather than blocking on a modal, and the
+message becomes a dismissible banner in the panel once the call returns. Script
+and document properties, `getUi().prompt()`, the dialog calls and installable
+triggers all throw, naming what was missing.
+
+Anything else is simply absent, so an add-on that reaches for it fails naming
+the call. That is the point of packaging real add-ons unmodified: what they need
+and we do not have shows up as a gap in the shims rather than as a patch to
+someone else's sample.
+
+### Where the two spreadsheet models differ
+
+Two differences are in the sheet itself rather than in any call, and an add-on
+written for Sheets can be surprised by both.
+
+A sheet here has a fixed grid, a million rows by sixteen thousand columns, and
+deleting rows shifts the cells below up and leaves blank rows at the bottom. In
+Sheets a grid grows and shrinks, so an add-on that deletes rows to trim a sheet
+finds the row count unchanged afterwards.
+
+`getMaxRows()` therefore returns that million, and an add-on that asks for the
+values of a range spanning every row gets a million cells read one at a time.
+The call works and is slow.
 
 ## Local testing
 

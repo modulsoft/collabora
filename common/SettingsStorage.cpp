@@ -21,6 +21,7 @@
 #include <Poco/File.h>
 #include <Poco/JSON/Object.h>
 #include <Poco/JSON/Parser.h>
+#include <Poco/Path.h>
 
 #include <exception>
 #include <fstream>
@@ -29,7 +30,7 @@
 namespace Desktop
 {
 
-void uploadSettings(const std::string& payload)
+bool uploadSettings(const std::string& payload)
 {
     try
     {
@@ -50,13 +51,18 @@ void uploadSettings(const std::string& payload)
         {
             LOG_ERR("uploadSettings failed: Could not open " << target.toString()
                                                              << " for writing");
-            return;
+            return false;
         }
         out << content;
+
+        // The group is the directory the file sits in, the way fetchSettingsConfig()
+        // keys it.
+        return target.depth() > 0 && target.directory(target.depth() - 1) == "xcu";
     }
     catch (const std::exception& ex)
     {
         LOG_ERR("uploadSettings failed: " << ex.what());
+        return false;
     }
 }
 
@@ -218,6 +224,17 @@ void syncSettings(const std::function<void(const std::vector<char>&)>& sendFileC
     {
         LOG_ERR("syncSettings failed: " << ex.what());
     }
+}
+
+Poco::Path getUserConfigRoot()
+{
+    // The dialog writes through uploadSettings(), which puts a group under
+    // settings/<config type>/. The apps have no admin iframe, so the type is
+    // always userconfig.
+    Poco::Path root = getConfigPath();
+    root.append("settings").append("userconfig");
+    root.makeDirectory();
+    return root;
 }
 
 static Poco::Path preferencesPath()

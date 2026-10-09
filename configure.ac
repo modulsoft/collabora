@@ -3,7 +3,7 @@
 
 AC_PREREQ([2.63])
 
-AC_INIT([coolwsd], [26.04.4.2], [https://github.com/CollaboraOnline/online/issues], [coolwsd], [https://www.collaboraoffice.org/])
+AC_INIT([coolwsd], [26.04.5.1], [https://github.com/CollaboraOnline/online/issues], [coolwsd], [https://www.collaboraoffice.org/])
 LT_INIT([shared, disable-static, dlopen])
 
 AM_INIT_AUTOMAKE([1.10 foreign subdir-objects tar-pax -Wno-portability])
@@ -52,12 +52,27 @@ if test "$enable_androidapp" = "yes"; then
 fi
 AC_SUBST(ANDROID_PACKAGE_VERSIONCODE)
 
-COOLWSD_VERSION="$COOLWSD_VERSION_MAJOR.$COOLWSD_VERSION_MINOR.$COOLWSD_VERSION_MICRO.$COOLWSD_VERSION_NANO"
+COOLWSD_VERSION_BUILD_ID=
+AC_MSG_CHECKING([for build ID])
+if test -n "$with_build_id"; then
+    COOLWSD_VERSION_BUILD_ID=$with_build_id
+    case "$COOLWSD_VERSION_BUILD_ID" in
+        *@<:@!0-9@:>@*)
+            AC_MSG_ERROR([--with-build-id should be numerical, got "$with_build_id"])
+            ;;
+    esac
+    AC_MSG_RESULT([$COOLWSD_VERSION_BUILD_ID])
+    COOLWSD_VERSION="$COOLWSD_VERSION_MAJOR.$COOLWSD_VERSION_MINOR.$COOLWSD_VERSION_MICRO.$COOLWSD_VERSION_NANO-$COOLWSD_VERSION_BUILD_ID"
+else
+    AC_MSG_RESULT([not set, skipping...])
+    COOLWSD_VERSION="$COOLWSD_VERSION_MAJOR.$COOLWSD_VERSION_MINOR.$COOLWSD_VERSION_MICRO.$COOLWSD_VERSION_NANO"
+fi
 
 AC_SUBST([COOLWSD_VERSION_MAJOR])
 AC_SUBST([COOLWSD_VERSION_MINOR])
 AC_SUBST([COOLWSD_VERSION_MICRO])
 AC_SUBST([COOLWSD_VERSION_NANO])
+AC_SUBST([COOLWSD_VERSION_BUILD_ID])
 AC_SUBST([COOLWSD_VERSION])
 
 AC_DEFINE_UNQUOTED([COOLWSD_VERSION],[["$COOLWSD_VERSION"]],[Collabora Online WebSocket server version])
@@ -218,6 +233,11 @@ AC_ARG_ENABLE([iosapp],
               AS_HELP_STRING([--enable-iosapp],
                              [Use on a Mac where you will build the iOS app.]))
 
+AC_ARG_WITH([iosapp-bundle-version],
+            AS_HELP_STRING([--with-iosapp-bundle-version=23],
+                           [Set the bundle version for the iOS app. If not set, we will count up starting from 1]),
+,)
+
 AC_ARG_ENABLE([macosapp],
               AS_HELP_STRING([--enable-macosapp],
                              [Use on a Mac where you will build the macOS app.]))
@@ -308,6 +328,10 @@ AC_ARG_WITH(android-package-versioncode,
             AS_HELP_STRING([--with-android-package-versioncode=6.7.8-23],
                            [Set the versionCode for the Android package.]),
 ,)
+
+AC_ARG_WITH(build-id,
+            AS_HELP_STRING([--with-build-id=23],
+                           [Set the build ID, which will appear after the version with a dash (e.g. 26.04.0.0-23)]))
 
 AC_ARG_WITH(android-abi,
             AS_HELP_STRING([--with-android-abi=x86_64],
@@ -1242,14 +1266,21 @@ IOSAPP_BUNDLE_SHORT_VERSION="$COOLWSD_VERSION_MAJOR$COOLWSD_VERSION_MINOR.$COOLW
 IOSAPP_BUNDLE_VERSION=
 
 if test "$enable_iosapp" = "yes"; then
-   ENABLE_IOSAPP=true
+    ENABLE_IOSAPP=true
 
-   if test -f BUNDLE-VERSION; then
-       IOSAPP_BUNDLE_VERSION=$(cat BUNDLE-VERSION)
-   else
-       IOSAPP_BUNDLE_VERSION=1
-   fi
-   echo $IOSAPP_BUNDLE_VERSION >BUNDLE-VERSION
+    if test -n "$with_iosapp_bundle_version" -a "$with_iosapp_bundle_version" != "no"; then
+        case "$with_iosapp_bundle_version" in
+            ''|*@<:@!0-9@:>@*)
+                AC_MSG_ERROR([--with-iosapp-bundle-version must be a number if provided, got "$with_iosapp_bundle_version"])
+                ;;
+        esac
+        IOSAPP_BUNDLE_VERSION=$with_iosapp_bundle_version
+    elif test -f BUNDLE-VERSION; then
+        IOSAPP_BUNDLE_VERSION=$(cat BUNDLE-VERSION)
+    else
+        IOSAPP_BUNDLE_VERSION=1
+    fi
+    echo $IOSAPP_BUNDLE_VERSION >BUNDLE-VERSION
 fi
 
 AC_SUBST(ENABLE_IOSAPP)
@@ -1307,6 +1338,11 @@ if test "$enable_qtapp" = "yes"; then
 fi
 AC_SUBST(ENABLE_QTAPP)
 AM_CONDITIONAL([ENABLE_QTAPP], [test "$ENABLE_QTAPP" = "true"])
+
+dnl The desktop apps show their open documents as tabs, and both draw the tab
+dnl strip with the same HTML page out of the browser bundle.
+AM_CONDITIONAL([ENABLE_TABSTRIP],
+               [test "$ENABLE_QTAPP" = "true" -o "$ENABLE_WINDOWSAPP" = "true"])
 
 ENABLE_QTAPP_TESTS=false
 AT_SPI_DRIVER_PATH=
@@ -1456,12 +1492,29 @@ if test "$enable_hardening" = no; then
 
     AC_MSG_CHECKING([whether $CC supports -D_FORTIFY_SOURCE=2])
     save_CFLAGS=$CFLAGS
-    CFLAGS="$CFLAGS -Werror -Wp,-U_FORTIFY_SOURCE -Wp,-D_FORTIFY_SOURCE=2"
+    # Probe with optimization on. Ubuntu's gcc defines _FORTIFY_SOURCE=3 itself
+    # when optimizing unless a driver-visible -D/-U_FORTIFY_SOURCE is given, and
+    # the -Wp, spellings are not visible to it. There the macro gets redefined
+    # and the probe fails, which is right: the compiler already fortifies.
+    CFLAGS="$CFLAGS -O2 -Werror -Wp,-U_FORTIFY_SOURCE -Wp,-D_FORTIFY_SOURCE=2"
     AC_LINK_IFELSE(
         [AC_LANG_PROGRAM([[#include <string.h>]], [[return 0;]])],
-        [AC_MSG_RESULT([yes]); HARDENING_CFLAGS="$HARDENING_CFLAGS -Wp,-U_FORTIFY_SOURCE -Wp,-D_FORTIFY_SOURCE=2"],
-        [AC_MSG_RESULT([no])])
+        [fortify_source_works=yes],
+        [fortify_source_works=no])
+    # Probe again with the passed-in CFLAGS the build will actually use, because if those do not
+    # enable optimization, setting _FORTIFY_SOURCE would later warn/error during the build:
+    CFLAGS="$save_CFLAGS -Werror -Wp,-U_FORTIFY_SOURCE -Wp,-D_FORTIFY_SOURCE=2"
+    AC_LINK_IFELSE(
+        [AC_LANG_PROGRAM([[#include <string.h>]], [[return 0;]])],
+        [],
+        [fortify_source_works=no])
     CFLAGS=$save_CFLAGS
+    if test "$fortify_source_works" = yes; then
+        AC_MSG_RESULT([yes])
+        HARDENING_CFLAGS="$HARDENING_CFLAGS -Wp,-U_FORTIFY_SOURCE -Wp,-D_FORTIFY_SOURCE=2"
+    else
+        AC_MSG_RESULT([no])
+    fi
 
     AC_MSG_CHECKING([whether $CC supports -D_GLIBCXX_ASSERTIONS])
     save_CFLAGS=$CFLAGS
@@ -1743,35 +1796,44 @@ if test "$ENABLE_RUNTIME_OPTIMIZATIONS" != no; then
     AC_DEFINE([ENABLE_RUNTIME_OPTIMIZATIONS],1,[Define to 1 if this is not a sanitizers build.])
 fi
 
-# Check for C++20 support.
+# Check for >= C++20 support.
 HAVE_CXXSTD=
 CXXFLAGS_CXXSTD=
 if test "$external_toolchain_app" != "yes"; then
-    AC_MSG_CHECKING([whether $CXX supports C++20])
-    for flag in -std=c++20 -std=c++2a ; do
-        save_CXXFLAGS=$CXXFLAGS
-        CXXFLAGS="$CXXFLAGS $flag -Werror"
-        AC_LANG_PUSH([C++])
-        AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
-            #include <algorithm>
-            #include <functional>
-            #include <vector>
-            void f(std::vector<int> & v, std::function<bool(int, int)> fn) {
-                std::sort(v.begin(), v.end(), fn);
-            }
-            ]])],[CXXFLAGS_CXXSTD=$flag])
-        AC_LANG_POP([C++])
-        CXXFLAGS=$save_CXXFLAGS
-        if test -n "$CXXFLAGS_CXXSTD"; then
-            HAVE_CXXSTD=TRUE
-            break
-        fi
-    done
-    if test "$HAVE_CXXSTD" = TRUE; then
-        AC_MSG_RESULT([yes ($CXXFLAGS_CXXSTD)])
+    engine_config_host_mk="${engine_builddir:-$ENGINE_BUILDDIR}/config_host.mk"
+    if test -f "$engine_config_host_mk"; then
+        CXXFLAGS_CXXSTD=`sed -n 's/^export CXXFLAGS_CXX11=//p' "$engine_config_host_mk"`
+    fi
+    if test -n "$CXXFLAGS_CXXSTD"; then
+        HAVE_CXXSTD=TRUE
+        AC_MSG_NOTICE([taking the C++ standard from the engine: $CXXFLAGS_CXXSTD])
     else
-        AC_MSG_RESULT([no])
-        AC_MSG_ERROR(Compiler doesn't support C++20)
+        AC_MSG_CHECKING([whether $CXX supports C++20])
+        for flag in -std=c++20 -std=c++2a ; do
+            save_CXXFLAGS=$CXXFLAGS
+            CXXFLAGS="$CXXFLAGS $flag -Werror"
+            AC_LANG_PUSH([C++])
+            AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+                #include <algorithm>
+                #include <functional>
+                #include <vector>
+                void f(std::vector<int> & v, std::function<bool(int, int)> fn) {
+                    std::sort(v.begin(), v.end(), fn);
+                }
+                ]])],[CXXFLAGS_CXXSTD=$flag])
+            AC_LANG_POP([C++])
+            CXXFLAGS=$save_CXXFLAGS
+            if test -n "$CXXFLAGS_CXXSTD"; then
+                HAVE_CXXSTD=TRUE
+                break
+            fi
+        done
+        if test "$HAVE_CXXSTD" = TRUE; then
+            AC_MSG_RESULT([yes ($CXXFLAGS_CXXSTD)])
+        else
+            AC_MSG_RESULT([no])
+            AC_MSG_ERROR(Compiler doesn't support C++20)
+        fi
     fi
 fi
 

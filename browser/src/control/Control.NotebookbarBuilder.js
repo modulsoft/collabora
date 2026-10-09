@@ -181,14 +181,17 @@ window.L.Control.NotebookbarBuilder = window.L.Control.JSDialogBuilder.extend({
 
 		if (commandName === '.uno:CharFontName') {
 			if (window.ThisIsTheiOSApp) {
-				if (state === '')
-					$('#fontnamecomboboxios').html(_('Font Name'));
-				else
-					$('#fontnamecomboboxios').html(state);
+				const fontNameCombobox = document.getElementById('fontnamecomboboxios');
+				if (fontNameCombobox)
+					fontNameCombobox.textContent = state === '' ? _('Font Name') : state;
 				window.LastSetiOSFontNameButtonFont = state;
 			}
 		} else if (commandName === '.uno:StyleApply') {
-			$('#applystyle').val(state).trigger('change');
+			const applyStyle = document.getElementById('applystyle');
+			if (applyStyle) {
+				applyStyle.value = state;
+				applyStyle.dispatchEvent(new Event('change'));
+			}
 		}
 		else if (commandName === '.uno:ModifiedStatus') {
 			const saveEle = document.querySelector('[id^="save"].unotoolbutton');
@@ -591,6 +594,8 @@ window.L.Control.NotebookbarBuilder = window.L.Control.JSDialogBuilder.extend({
 			tooltip.id = 'save-status';
 			tooltip.className = 'tooltip-label visuallyhidden';
 			tooltip.setAttribute('role', 'tooltip');
+			// Text that changes length ahead of the document shifts NVDA's say all by a character.
+			tooltip.setAttribute('aria-hidden', 'true');
 			control.label = tooltip;
 
 			control.button.parentElement.appendChild(tooltip);
@@ -601,6 +606,7 @@ window.L.Control.NotebookbarBuilder = window.L.Control.JSDialogBuilder.extend({
 					tooltip.textContent = isModified
 						? _('Unsaved changes.') + ' ' + e.lastSaved
 						: e.lastSaved;
+					control.button.setAttribute('aria-description', tooltip.textContent);
 					control.button.setAttribute('aria-label', isModified ? _('Unsaved changes. Save') : _('Save'));
 				}
 			});

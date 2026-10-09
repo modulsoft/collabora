@@ -32,6 +32,8 @@
         <enabled desc="Master switch for AI features. When false, AI is disabled server-wide regardless of WOPI or per-user settings." type="bool" default="false">false</enabled>
         <allow_user_settings desc="If true, users may configure their own AI provider (base URL, key, model) in the settings dialog, overriding the defaults below. Set to false to force every user onto the central endpoint configured here: the per-user AI settings are hidden and any user-provided credentials are ignored, so no user can point AI at their own endpoint." type="bool" default="true">true</allow_user_settings>
         <ethical_rating_message desc="If true, the ethical AI rating badge in the assistant sidebar explains itself - as a tooltip on hover and as a description for screen readers. Set to false to show the bare rating letter without the explanation. The badge itself is always shown." type="bool" default="true">true</ethical_rating_message>
+        <show_ai_sidebar desc="If true, the AI Assistant sidebar opens by itself when a document loads, so a user can type a query without clicking first. Only applies where AI is configured and the user may see it. Leave false to keep the AI Assistant tab as the way in - the tab is shown either way. This answers for the whole instance; an integrator can override it for one user with the TextAISidebar, SpreadsheetAISidebar, PresentationAISidebar or DrawingAISidebar ui_default." type="bool" default="false">false</show_ai_sidebar>
+        <show_ai_notebookbar desc="If true, a document opens with the AI Assistant tab of the notebookbar selected rather than Home, so the assistant is the first thing on offer. Only applies where AI is configured and the notebookbar is the UI in use. This answers for the whole instance; an integrator can override it for one user with the TextAINotebookbar, SpreadsheetAINotebookbar, PresentationAINotebookbar or DrawingAINotebookbar ui_default." type="bool" default="false">false</show_ai_notebookbar>
         <api_url desc="Default AI provider base URL (e.g. http://localhost:11434 for local Ollama, or https://api.openai.com for OpenAI). Must support the /v1/chat/completions endpoint. While ai.enabled is true, AI requests reach this host without a net.lok_allow entry. Documents that fetch external data from the same host still need one." type="string" default=""></api_url>
         <api_key desc="Default API key for the AI provider. May be left empty for self-hosted models that do not require authentication." type="string" default=""></api_key>
         <model desc="Default AI model name. For tool use (inspecting and editing the document) the model must support native function/tool calling - e.g. gpt-4o, llama3.1, qwen2.5. Models without it (e.g. base llama3, gemma) can still chat but cannot drive document tools." type="string" default=""></model>
@@ -220,6 +222,11 @@
       frame-src 'self' server-to-inject-iframe-from.xyz;
       connect-src 'self' server-to-inject-js-from.io;
       frame-ancestors server-embedding-collabora-online-iframe
+
+      A page that relays messages between the document page and the WOPI host is named in
+      frame-ancestors here too, and only a source named here is accepted as a relay. Write it
+      as the browser writes an origin, with the scheme and without a path, for example
+      https://relay.example.com, because the page posts to exactly that text.
       -->
       </content_security_policy>
       <frame_ancestors desc="OBSOLETE: Use content_security_policy. Specify who is allowed to embed the Collabora Online iframe (coolwsd and WOPI host are always allowed). Separate multiple hosts by space."></frame_ancestors>
@@ -307,10 +314,17 @@
                 <refresh desc="How frequently we should re-acquire a lock with the storage server, in seconds (default 15 mins) or 0 for no refresh" type="int" default="900">900</refresh>
             </locking>
 
-            <alias_groups desc="default mode is 'first' it allows only the first host connecting to coolwsd when groups are not defined. set mode to 'groups' and define group to allow multiple host and its aliases" mode="first">
-            <!-- If you need to use multiple wopi hosts, change the mode to "groups" and
-                    add the hosts below. If one host is accessible under multiple ip addresses
-                    or names, add them as aliases. -->
+            <alias_groups desc="The WOPI hosts that may connect. In mode 'first' with no group defined, the first host to connect after each start becomes the only trusted host. In mode 'groups' only the hosts you list in groups are trusted." mode="first">
+            <!-- One WOPI host, the simple case: set the mode above to "groups", uncomment this
+                 group and put in the address of your WOPI host. -->
+            <!--
+            <group>
+                    <host allow="true">https://cloud.example.com:443</host>
+            </group>
+            -->
+            <!-- Several WOPI hosts, or a host also reached under other names or addresses: set
+                 the mode above to "groups" and add one group for each host instead, with its other
+                 names as aliases, as in this example. -->
             <!--
             <group>
                     <host desc="Host to allow or deny. The scheme is optional and not used for matching; only the host and port are. A regex is allowed in the host part." allow="true">scheme://hostname:port</host>
@@ -411,15 +425,15 @@
       <controller_monitor_url desc="Which of the monitors.monitor entries is the controller. Documents are handed over to it before this server shuts down. When left empty, a monitor whose address contains the word controller is taken to be the controller." type="string" default=""></controller_monitor_url>
     </indirection_endpoint>
 
-    <remote_documents desc="Live links from open documents to documents open on this or another server">
-      <enable desc="Enable subscriptions to remote documents" type="bool" default="false">false</enable>
+    <remote_links desc="Live links from open documents to documents open on this or another server">
+      <enable desc="Enable remote links" type="bool" default="false">false</enable>
       <server_url desc="Base URL this server dials remote documents through, usually the public proxy in front of the cluster. Empty falls back to server_name, then to this server's own address." type="string" default=""></server_url>
       <chain_secret desc="Secret a server proves a remote document connection of its own with, so that such a connection may name the documents already on its chain and the cycles between two servers are refused. Set the same value on every server of a cluster. Empty gets a secret for this process alone, which no other server holds." type="string" default=""></chain_secret>
       <max_remote_docs desc="The maximum number of remote documents this server connects to" type="uint" default="16">16</max_remote_docs>
       <max_links_per_document desc="The maximum number of remote documents one document may subscribe to" type="uint" default="4">4</max_links_per_document>
       <max_chain_depth desc="The maximum length of a chain of documents linked to each other" type="uint" default="3">3</max_chain_depth>
       <reconnect_attempts desc="How many times a lost connection to a remote document is retried" type="uint" default="5">5</reconnect_attempts>
-    </remote_documents>
+    </remote_links>
 
     @HOME_MODE_CONFIGURATION@
 

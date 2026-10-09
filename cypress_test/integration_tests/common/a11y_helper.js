@@ -769,6 +769,50 @@ const sidebarKeyboard = {
 		});
 	},
 
+	/// The engine reports a change of table cell by putting the DOM selection in
+	/// the hidden contenteditable, which focuses it. Moving the cursor with a uno
+	/// command reproduces that without typing, so the focus is provably still
+	/// where the keyboard left it and not where a race put it.
+	///
+	/// The cursor jumps into a table first and then to the next cell of that
+	/// table. The sidebar context stays Table, so core keeps the deck as it is.
+	assertCursorMoveKeepsFocus: function (getWin) {
+		cy.then(function () {
+			getWin().app.map.sendUnoCommand('.uno:JumpToNextTable');
+			return helper.processToIdle(getWin());
+		});
+		// core enables DeleteTable only while the cursor is inside a table
+		helper.waitForMapState('.uno:DeleteTable', 'enabled');
+
+		cy.realPress('F6');
+
+		cy.then(function () {
+			const win = getWin();
+			const before = win.document.activeElement;
+			expect(win.app.map.sidebar.wrapper.contains(before),
+				'the focus entered the deck').to.equal(true);
+
+			// the text input remembers the cell the engine last reported
+			const textInput = win.app.map._textInput;
+			const cellBefore = [textInput._lastRowIndex, textInput._lastColIndex];
+
+			win.app.map.sendUnoCommand('.uno:JumpToNextCell');
+
+			cy.cGet('div.clipboard').should(function () {
+				expect([textInput._lastRowIndex, textInput._lastColIndex],
+					'the engine reported the new cell').to.not.deep.equal(cellBefore);
+			});
+
+			cy.then(function () { return helper.processToIdle(win); });
+
+			cy.cGet('#sidebar-dock-wrapper').should(function () {
+				expect(describeFocusable(win.document.activeElement),
+					'the focus after the engine moved the cursor')
+					.to.equal(describeFocusable(before));
+			});
+		});
+	},
+
 	assertRingLeavesTheDeck: function (getWin) {
 		cy.realPress('F6');
 		cy.realPress('Tab');
@@ -854,6 +898,8 @@ function axNode(node) {
 		description: (node.description && node.description.value) || '',
 		ignored: node.ignored,
 		backendDOMNodeId: node.backendDOMNodeId,
+		nodeId: node.nodeId,
+		childIds: node.childIds || [],
 		properties: props,
 	};
 }
@@ -936,6 +982,27 @@ function domIdsIn(root) {
 	});
 
 	return ids;
+}
+
+/// The same accessibility nodes, each told which element it stands for. The
+/// tree does not always name an element the way the DOM does: a collapsed
+/// select is a menu to the browser, so its values arrive as menu items, and a
+/// disabled one carries no selection state to tell it apart from the items of
+/// a real menu. One DOM fetch answers for the whole set.
+function withDomNames(nodes) {
+	return getDomTree().then(function (root) {
+		const names = {};
+
+		walkDomTree(root, function (node) {
+			names[node.backendNodeId] = node.nodeName;
+		});
+
+		return nodes.map(function (node) {
+			return Object.assign({}, node, {
+				domName: names[node.backendDOMNodeId] || '',
+			});
+		});
+	});
 }
 
 /// The accessibility subtree of the one element of a document that matches a
@@ -1199,13 +1266,226 @@ function contrastRatio(one, other) {
 	return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
 }
 
+const OPERABLE_TYPES = [
+	'bigcustomtoolitem',
+	'bigtoolitem',
+	'checkbox',
+	'combobox',
+	'customtoolitem',
+	'exportmenubutton',
+	'iconviewlist',
+	'linetransparency',
+	'listbox',
+	'menubutton',
+	'toolitem',
+];
+
+function shortcutName(item) {
+	return item.command || item.id || '<' + item.type + '>';
+}
+
+function isSpacer(item) {
+	return !item.command && !(item.text && item.text.trim());
+}
+
+function rendersNothing(win, item) {
+	if (!item.command) return false;
+	if (item.type !== 'toolitem' && item.type !== 'bigtoolitem') return false;
+
+	const builder = win.app.map.uiManager.notebookbar.builder;
+	const handler = builder && builder._toolitemHandlers[item.command];
+
+	return !!handler && String(handler).replace(/\s/g, '') === 'function(){}';
+}
+
+function notebookbarShortcuts(win) {
+	const notebookbar = win.app.map.uiManager.notebookbar;
+	const json = notebookbar.getFullJSON();
+
+	let container = json;
+	while (container && container.id !== 'ContextContainer' && container.children)
+		container = container.children[0];
+	expect(container && container.id, 'the tab page container').to.equal('ContextContainer');
+
+	function collect(node, into, group) {
+		if (Array.isArray(node)) {
+			node.forEach(function (child) { collect(child, into, group); });
+			return;
+		}
+		if (!node || typeof node !== 'object') return;
+
+		const isGroup = node.type === 'overflowgroup';
+
+		if (!rendersNothing(win, node)) {
+			if (node.accessibility && node.accessibility.combination) {
+				if (!isGroup)
+					into.items.push({
+						name: shortcutName(node),
+						combination: node.accessibility.combination,
+					});
+			} else if (OPERABLE_TYPES.indexOf(node.type) !== -1 && !isSpacer(node)) {
+				into.unreachable.push({ name: shortcutName(node), type: node.type, group: group });
+			}
+		}
+
+		if (node.more && node.more.accessibility && node.more.accessibility.combination) {
+			into.items.push({
+				name: shortcutName(node) + ' (more)',
+				combination: node.more.accessibility.combination,
+			});
+		}
+
+		if (node.children)
+			collect(node.children, into, isGroup ? shortcutName(node) : group);
+	}
+
+	const found = [];
+	container.children.forEach(function (page) {
+		const content = page.children && page.children[0];
+		if (!content) return;
+		const tab = { where: content.id, items: [], unreachable: [] };
+		collect(content.children, tab, null);
+		if (tab.items.length || tab.unreachable.length) found.push(tab);
+	});
+
+	const strip = notebookbar.getTabs().filter(function (tab) {
+		return tab.accessibility && tab.accessibility.combination;
+	}).map(function (tab) {
+		return { name: tab.id, combination: tab.accessibility.combination };
+	});
+	found.push({ where: 'the tab strip', items: strip, unreachable: [] });
+
+	return found;
+}
+
+function notebookbarShortcutTargets(win) {
+	const definitions = win.app.UI.notebookbarAccessibility.definitions.getDefinitions();
+	const found = [];
+
+	const undrawn = new Set();
+	(function walk(node) {
+		if (Array.isArray(node)) {
+			node.forEach(walk);
+			return;
+		}
+		if (!node || typeof node !== 'object') return;
+		if (node.id && rendersNothing(win, node)) undrawn.add(node.id);
+		if (node.children) walk(node.children);
+	})(win.app.map.uiManager.notebookbar.getFullJSON());
+
+	Object.keys(definitions).forEach(function (tabId) {
+		const entries = definitions[tabId].contentList || [];
+		if (!entries.length) return;
+
+		found.push({
+			where: tabId,
+			targets: entries.filter(function (entry) {
+				return !undrawn.has(entry.id);
+			}).map(function (entry) {
+				const element = entry.id
+					? win.document.querySelector('[id^="' + entry.id + '"]')
+					: null;
+				return {
+					id: entry.id,
+					combination: entry.combination,
+					element: element,
+				};
+			}),
+		});
+	});
+
+	return found;
+}
+
+function assertShortcutsFindTheirWidgets(tabs) {
+	const problems = [];
+
+	tabs.forEach(function (tab) {
+		const claimedBy = new Map();
+
+		tab.targets.forEach(function (target) {
+			const name = target.combination + ' (' + target.id + ')';
+
+			if (!target.id || target.id === 'undefined') {
+				problems.push(tab.where + ': ' + target.combination + ' names no widget');
+				return;
+			}
+
+			if (!target.element) {
+				problems.push(tab.where + ': ' + name + ' finds no element');
+				return;
+			}
+
+			const other = claimedBy.get(target.element);
+			if (other && other.combination !== target.combination)
+				problems.push(tab.where + ': ' + name + ' lands on the same element as ' +
+					other.combination + ' (' + other.id + ')');
+			else if (!other)
+				claimedBy.set(target.element, target);
+		});
+	});
+
+	expect(problems, 'shortcuts that do not reach their own widget: ' + problems.join(' | '))
+		.to.be.empty;
+}
+
+function assertShortcutsAreDistinct(tabs) {
+	const problems = [];
+
+	tabs.forEach(function (tab) {
+		const describe = function (item) {
+			return item.combination + ' (' + item.name + ')';
+		};
+
+		tab.items.forEach(function (one, at) {
+			tab.items.slice(at + 1).forEach(function (other) {
+				if (one.name === other.name) return;
+
+				if (one.combination === other.combination) {
+					problems.push(tab.where + ': ' + describe(one) + ' and ' + describe(other) +
+						' answer to the same keys');
+					return;
+				}
+
+				const first = one.combination.length <= other.combination.length ? one : other;
+				const second = first === one ? other : one;
+				if (second.combination.indexOf(first.combination) === 0)
+					problems.push(tab.where + ': ' + describe(first) + ' swallows ' + describe(second));
+			});
+		});
+	});
+
+	expect(problems, 'shortcuts that cannot both be typed: ' + problems.join(' | '))
+		.to.be.empty;
+}
+
+function assertEveryControlHasAShortcut(tabs) {
+	const problems = [];
+
+	tabs.forEach(function (tab) {
+		tab.unreachable.forEach(function (item) {
+			problems.push(tab.where + ': ' + item.name +
+				(item.group ? ' in ' + item.group : ''));
+		});
+	});
+
+	expect(problems, 'controls no shortcut reaches: ' + problems.join(' | '))
+		.to.be.empty;
+}
+
 module.exports.getFocusedAXNode = getFocusedAXNode;
 module.exports.assertToggleStatesAgree = assertToggleStatesAgree;
 module.exports.getAXNodes = getAXNodes;
 module.exports.getAXNodesWithin = getAXNodesWithin;
+module.exports.withDomNames = withDomNames;
 module.exports.describeAXNode = describeAXNode;
 module.exports.assertDropdownButtonNamesItsList = assertDropdownButtonNamesItsList;
 module.exports.contrastRatio = contrastRatio;
 module.exports.relativeLuminance = relativeLuminance;
 module.exports.effectiveBackground = effectiveBackground;
 module.exports.renderedTextColor = renderedTextColor;
+module.exports.notebookbarShortcuts = notebookbarShortcuts;
+module.exports.assertShortcutsAreDistinct = assertShortcutsAreDistinct;
+module.exports.assertEveryControlHasAShortcut = assertEveryControlHasAShortcut;
+module.exports.notebookbarShortcutTargets = notebookbarShortcutTargets;
+module.exports.assertShortcutsFindTheirWidgets = assertShortcutsFindTheirWidgets;

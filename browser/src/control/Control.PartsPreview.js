@@ -102,6 +102,7 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		map.on('updatepart', this._updatePart, this);
 		map.on('invalidateparts', this._invalidateParts, this);
 		map.on('tilepreview', this._updatePreview, this);
+		map.on('tilepreviewgone', this._onPreviewGone, this);
 		map.on('insertpage', this._insertPreview, this);
 		map.on('deletepage', this._deletePreview, this);
 		map.on('scrolllimit', this._invalidateCurrentPart, this);
@@ -365,15 +366,12 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		}
 	},
 
-	// Three avatars at most, never our own
-	_maxFrameAvatars: 3,
-
 	// Put every other user's avatar on the preview of the slide that user is on.
 	_updateViewAvatars: function () {
 		if (!this._previewInitialized || !this._map.userList)
 			return;
 
-		if (window.mode.isSmallScreenDevice() || this._map.userList.hideUserList())
+		if (window.mode.isSmallScreenDevice() || window.mode.isInteractivePreview() || this._map.userList.hideUserList())
 			return;
 
 		var viewIdsByPart = new Map();
@@ -426,11 +424,9 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			frame.insertBefore(strip, img.nextSibling);
 		}
 
-		var shown = Math.min(
-			viewIds.length > 2 ? viewIds.length - 1 : viewIds.length,
-			this._maxFrameAvatars);
+		var slots = app.SlideAvatars.slots(viewIds.length);
 
-		var children = viewIds.slice(0, shown).map(function (viewId, index) {
+		var children = viewIds.slice(0, slots.faces).map(function (viewId, index) {
 			// The user list keeps the avatar between updates
 			var user = map.userList.users.get(viewId);
 			var avatar = map.userList.createAvatar(user && user.cachedSlideAvatar,
@@ -438,12 +434,23 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 				app.LOUtil.rgbToHex(map.getViewColor(viewId)));
 			if (user)
 				user.cachedSlideAvatar = avatar;
+			avatar.setAttribute('data-cooltip', img.viewNames[index]);
+			// A drag grabbed on a face starts from the frame, as one
+			// grabbed on the picture does.
+			avatar.draggable = false;
+			if (!avatar.namesItsUser) {
+				avatar.namesItsUser = true;
+				window.L.control.attachTooltipEventListener(avatar, map);
+				window.L.DomEvent.on(avatar, 'click', this._selectSlideUnder);
+			}
 			return avatar;
-		});
+		}, this);
 
-		if (viewIds.length > shown) {
+		if (slots.hidden) {
 			var more = window.L.DomUtil.create('span', 'preview-avatars-more');
-			more.textContent = '+' + (viewIds.length - shown);
+			more.textContent = app.SlideAvatars.counterText(slots.hidden);
+			more.setAttribute('data-cooltip', _('Show everyone on this slide'));
+			window.L.control.attachTooltipEventListener(more, map);
 			window.L.DomEvent.on(more, 'click', function (e) {
 				window.L.DomEvent.stop(e);
 				this._openFrameUserList(more, viewIds);
@@ -545,6 +552,26 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 					document.activeElement.blur();
 				}
 			}
+			img.focus();
+		}, this);
+
+		// A double-click on a slide in the maximized grid returns to the normal layout. The first
+		// click of the pair has already selected the slide, so the strip scrolls to show it and it
+		// keeps the focus. While a comment is being edited a click stays on the comment and the
+		// slide does not change, so the double-click leaves the layout as it is too.
+		window.L.DomEvent.on(img, 'dblclick', function (e) {
+			var expander = this._map.paneExpander;
+			if (!expander || expander.getMode() !== 'expanded')
+				return;
+			if (e.ctrlKey || e.shiftKey || e.altKey || e.metaKey)
+				return;
+			if (cool.Comment.isAnyEdit())
+				return;
+			window.L.DomEvent.stop(e);
+			var part = this._findClickedPart(img.parentNode);
+			expander.reset();
+			if (part !== null && part !== -1)
+				this._scrollToPart(parseInt(part) - 1);
 			img.focus();
 		}, this);
 
@@ -837,6 +864,49 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		return img;
 	},
 
+	// An avatar is kept between updates and travels with its user, so the
+	// slide it selects is the one it is drawn on now.
+	_selectSlideUnder: function (e) {
+		window.L.DomEvent.stop(e);
+		const frame = e.currentTarget.closest('.preview-frame');
+		const picture = frame && frame.querySelector('.preview-img');
+		if (!picture)
+			return;
+		// ctrl and shift pick a slide differently, so they travel with the
+		// click rather than being dropped by a synthetic one.
+		picture.dispatchEvent(
+			new MouseEvent('click', {
+				bubbles: true,
+				cancelable: true,
+				ctrlKey: e.ctrlKey,
+				shiftKey: e.shiftKey,
+				altKey: e.altKey,
+				metaKey: e.metaKey,
+			}),
+		);
+	},
+
+	// The names the faces show, then a count for anyone past them.
+	_peopleHere: function (img) {
+		const all = img.viewNames || [];
+		if (!all.length)
+			return '';
+		const named = all.filter(function (name) { return name; });
+		if (!named.length)
+			return _n('with 1 other', 'with %n others', all.length);
+		const names = named.slice(0, app.SlideAvatars.slots(all.length).faces);
+		const shown = names.join(', ');
+		const rest = all.length - names.length;
+		// The name goes in through a function, so one holding a '$' pattern
+		// goes in as it is.
+		const put = function (text) {
+			return text.replace('%1', function () { return shown; });
+		};
+		if (!rest)
+			return put(_('with %1'));
+		return put(_n('with %1 and 1 other', 'with %1 and %n others', rest));
+	},
+
 	// The visible digit, the alt text and the tooltip are plain position
 	// strings, so they only ever hold the position they were given here.
 	// Callers that move a preview to a different position must call this
@@ -845,6 +915,10 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 	_setPreviewPositionLabels: function (img, i) {
 		const link = this._pageLink(img);
 		const position = String(i + 1);
+		const people = this._peopleHere(img);
+		const withPeople = function (text) {
+			return people ? text + ', ' + people : text;
+		};
 		const slideNumber = img.parentNode &&
 			img.parentNode.querySelector('.preview-slide-number');
 		if (slideNumber)
@@ -860,11 +934,11 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			const values = { '%1': position, '%2': link.name, '%3': link.source };
 			img.setAttribute(
 				'alt',
-				fill(_('preview of page %1, linked to %2 in %3'), values),
+				withPeople(fill(_('preview of page %1, linked to %2 in %3'), values)),
 			);
 			img.setAttribute(
 				'data-cooltip',
-				fill(_('Slide %1, linked to %2 in %3'), values),
+				withPeople(fill(_('Slide %1, linked to %2 in %3'), values)),
 			);
 			return;
 		}
@@ -874,13 +948,22 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			const values = { '%1': position, '%2': link.source };
 			img.setAttribute(
 				'alt',
-				fill(_('preview of page %1, linked to %2'), values),
+				withPeople(fill(_('preview of page %1, linked to %2'), values)),
 			);
-			img.setAttribute('data-cooltip', fill(_('Slide %1, linked to %2'), values));
+			img.setAttribute(
+				'data-cooltip',
+				withPeople(fill(_('Slide %1, linked to %2'), values)),
+			);
 			return;
 		}
-		img.setAttribute('alt', _('preview of page %1').replace('%1', position));
-		img.setAttribute('data-cooltip', _('Slide %1').replace('%1', position));
+		img.setAttribute(
+			'alt',
+			withPeople(_('preview of page %1').replace('%1', position)),
+		);
+		img.setAttribute(
+			'data-cooltip',
+			withPeople(_('Slide %1').replace('%1', position)),
+		);
 	},
 
 	// The source document a slide is linked to and the slide of that document
@@ -1299,9 +1382,7 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 				app.socket.sendMessage('uno .uno:MoveSlideSectionDown');
 				break;
 			case 'removeSection':
-				that._map.deselectAll();
-				that._map.setPart(section.startIndex);
-				that._map.selectPart(section.startIndex, 1, false);
+				that._selectOnlyPart(section.startIndex);
 				app.socket.sendMessage('uno .uno:RemoveSlideSection');
 				break;
 			case 'removeSectionAndSlides': {
@@ -1471,7 +1552,7 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			// app native bridges (where navigator.clipboard.read() is unavailable
 			// or would pop up the WebView's system "Paste" confirmation).
 			const canReadClipboard = window.L.Browser.clipboardApiAvailable
-				|| window.ThisIsTheiOSApp || window.ThisIsTheMacOSApp || window.ThisIsTheWindowsApp;
+				|| window.mode.hasEngineClipboardProvider();
 			if (canReadClipboard) {
 				let html = '';
 				try {
@@ -1544,11 +1625,19 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			} else if (e.shiftKey) {
 				this._selectPartRange(this._map._docLayer._selectedPart, partId);
 			} else {
-				this._map.deselectAll();
-				this._map.setPart(partId);
-				this._map.selectPart(partId, 1, false); // And select.
+				this._selectOnlyPart(partId);
 			}
 		}
+	},
+
+	// Make the given slide the current one and the only selected one. The
+	// server switches to the slide before it gets the deselections, so the
+	// status that answers each deselection already names this slide as the
+	// current one, and the view stays on it.
+	_selectOnlyPart: function (partId) {
+		this._map.setPart(partId);
+		this._map.deselectAll();
+		this._map.selectPart(partId, 1, false);
 	},
 
 	_selectPartRange: function (start, end, scrollToEnd = true) {
@@ -1578,6 +1667,17 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		this._selectedPartRange = [start, end];
 		if (scrollToEnd)
 			this._scrollToPart(end);
+	},
+
+	// Selects every part. The current part stays the current one, so the view does not jump.
+	_selectAllParts: function () {
+		if (app.file.fileBasedView)
+			return;
+
+		this._selectedPartRange = undefined;
+		for (let id = 0; id < app.impress.partList.length; ++id)
+			this._map.selectPart(id, 1, false, false);
+		this._map.fire('updateparts', {});
 	},
 
 	_modifySelectedPartRange: function (direction) {
@@ -1741,14 +1841,15 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		}
 	},
 
+	// No pixels come for a preview of a page that is gone, so the request is answered.
+	_onPreviewGone: function () {
+		if (this._map.isPresentationOrDrawing())
+			this._map._previewRequestAnswered();
+	},
+
 	_updatePreview: function (e) {
 		if (this._map.isPresentationOrDrawing()) {
-			this._map._previewRequestsOnFly--;
-			if (this._map._previewRequestsOnFly < 0) {
-				this._map._previewRequestsOnFly = 0;
-				this._map._timeToEmptyQueue = new Date();
-			}
-			this._map._processPreviewQueue();
+			this._map._previewRequestAnswered();
 			if (!this._previewInitialized)
 				return;
 			if (e.part === undefined)
@@ -1979,9 +2080,7 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			// Same selection change as a plain click on the slide: the
 			// previous selection is dropped on the client and the server
 			// alike, so both agree on which slides the move applies to.
-			partsPreview._map.deselectAll();
-			partsPreview._map.setPart(partId);
-			partsPreview._map.selectPart(partId, 1, false); // And select.
+			partsPreview._selectOnlyPart(partId);
 		}
 		// By default we move when dragging, but can
 		// support duplication with ctrl in the future.

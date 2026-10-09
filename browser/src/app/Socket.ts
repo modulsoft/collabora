@@ -388,13 +388,23 @@ class Socket {
 		}
 		this.socket.onerror = function () {};
 		this.socket.onclose = function () {};
-		this.socket.onmessage = function () {};
+		// In a mobile app the socket stays open as the link to the native shell, so events like
+		// OS back button still arrive.
+		this.socket.onmessage = window.ThisIsAMobileApp
+			? this._onShellEventWhileClosed.bind(this)
+			: function () {};
 		this.socket.close();
 
 		// Reset wopi's app loaded so that reconnecting again informs outerframe about initialization
 		this._map['wopi'].resetAppLoaded();
 		this._map.fire('docloaded', { status: false });
 		clearTimeout(this._accessTokenExpireTimeout);
+	}
+
+	private _onShellEventWhileClosed(evt: MessageEvent): void {
+		if (typeof evt.data === 'string' && evt.data.startsWith('mobile:')) {
+			this._onMessage({ textMsg: evt.data });
+		}
 	}
 
 	private _doSend(msg: MessageInterface): void {
@@ -460,13 +470,7 @@ class Socket {
 
 		msg += ' timezone=' + Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-		if (this._map.options.renderingOptions) {
-			const options = {
-				rendering: this._map.options.renderingOptions,
-			};
-			msg += ' options=' + JSON.stringify(options);
-		}
-		const spellOnline = window.prefs.get('spellOnline');
+		const spellOnline = window.prefs.spellOnlineForLoad();
 		if (spellOnline) {
 			msg += ' spellOnline=' + spellOnline;
 		}
@@ -492,6 +496,11 @@ class Socket {
 		// other way of hearing about it (see initDarkModeFromSettings).
 		this._map.uiManager.rememberThemeSentWithLoad(darkTheme, darkBackground);
 		this._map.uiManager.initDarkBackgroundUI(darkBackground);
+
+		const focusRingColor = window.getFocusRingColor();
+		if (focusRingColor) {
+			msg += ' focusRingColor=' + focusRingColor;
+		}
 
 		msg += ' accessibilityState=' + window.getAccessibilityState();
 
@@ -1488,20 +1497,16 @@ class Socket {
 			this._onHyperlinkClickedMsg(textMsg);
 		} else if (textMsg.startsWith('browsersetting:')) {
 			window.prefs._initializeBrowserSetting(textMsg);
-		} else if (textMsg.startsWith('relateddocuments:')) {
-			const related = JSON.parse(
-				textMsg.substring('relateddocuments:'.length + 1),
-			);
-			app.relatedDocuments = related.documents || [];
-			this._map.fire('relateddocuments', {
-				documents: app.relatedDocuments,
+		} else if (textMsg.startsWith('remotelinks:')) {
+			const links = JSON.parse(textMsg.substring('remotelinks:'.length + 1));
+			app.remoteLinks = links.documents || [];
+			this._map.fire('remotelinks', {
+				documents: app.remoteLinks,
 			});
-		} else if (textMsg.startsWith('relateddocumenttoken:')) {
-			app.relatedDocumentToken = textMsg
-				.substring('relateddocumenttoken:'.length)
-				.trim();
-			this._map.fire('relateddocumenttoken', {
-				token: app.relatedDocumentToken,
+		} else if (textMsg.startsWith('linktoken:')) {
+			app.linkToken = textMsg.substring('linktoken:'.length).trim();
+			this._map.fire('linktoken', {
+				token: app.linkToken,
 			});
 		} else if (textMsg.startsWith('presetconfigid:')) {
 			app.presetConfigId = textMsg.substring('presetconfigid:'.length).trim();
@@ -1509,6 +1514,17 @@ class Socket {
 			app.userPresetConfigId = textMsg
 				.substring('userpresetconfigid:'.length)
 				.trim();
+		} else if (textMsg.startsWith('userpresetsapplied:')) {
+			app.userPresetsApplied =
+				textMsg.substring('userpresetsapplied:'.length).trim() === 'true';
+			this._map.fire('documentsettingsscope');
+		} else if (textMsg.startsWith('documentsettingslive:')) {
+			app.documentSettingsLive =
+				textMsg.substring('documentsettingslive:'.length).trim() === 'true';
+			// Sent again whenever someone joins or leaves, so a dialog that is
+			// already open is told rather than left on what was true when it
+			// was opened.
+			this._map.fire('documentsettingsscope');
 		} else if (textMsg.startsWith('viewsetting:')) {
 			const settingJSON = JSON.parse(
 				textMsg.substring('viewsetting:'.length + 1),
@@ -1557,10 +1573,11 @@ class Socket {
 	];
 
 	// A reply from a remote document, wrapped as
-	// "remotedoccommandresult: wopisrc=<enc>\n<inner frame>". Unwraps the
+	// "remotedoccommandresult: source=<enc>\n<inner frame>". Unwraps the
 	// header, then fires a remotedoccommandresult map event carrying the
-	// remote's WOPISrc and the inner frame as an ordinary (textMsg, imgBytes,
-	// imgIndex) triple, so a consumer reads it the way it reads any frame.
+	// persistent link of the remote link and the inner frame as an ordinary
+	// (textMsg, imgBytes, imgIndex) triple, so a consumer reads it the way it
+	// reads any frame.
 	private _onRemoteDocCommandResult(
 		textMsg: string,
 		e: SlurpMessageEvent,
@@ -1572,10 +1589,10 @@ class Socket {
 		const headerEnd = textMsg.indexOf('\n');
 		const header = headerEnd >= 0 ? textMsg.substring(0, headerEnd) : textMsg;
 
-		let wopiSrc = '';
+		let source = '';
 		for (const token of header.split(' ')) {
-			if (token.startsWith('wopisrc=')) {
-				wopiSrc = decodeURIComponent(token.substring('wopisrc='.length));
+			if (token.startsWith('source=')) {
+				source = decodeURIComponent(token.substring('source='.length));
 				break;
 			}
 		}
@@ -1616,7 +1633,7 @@ class Socket {
 		}
 
 		this._map.fire('remotedoccommandresult', {
-			wopiSrc: wopiSrc,
+			source: source,
 			textMsg: innerText,
 			imgBytes: imgBytes,
 			imgIndex: innerImgIndex,
@@ -1898,28 +1915,34 @@ class Socket {
 	}
 
 	private _askForDocumentPassword(passwordType: string, msg: string): void {
+		// Runs when the user dismisses the dialog
+		const giveUp = (): void => {
+			if (passwordType === 'to-modify') {
+				this._map._docPassword = '';
+				this._map.loadDocument();
+			} else if (window.ThisIsAMobileApp && !window.ThisIsTheEmscriptenApp) {
+				window.postMobileMessage('BYE');
+			} else {
+				this._map.fire('postMessage', { msgId: 'UI_Cancel_Password' });
+				this._map.hideBusy();
+			}
+		};
+
 		this._map.uiManager.showInputModal(
 			'password-popup',
 			'',
 			msg,
 			'',
 			_('OK'),
-			function (this: Socket, data: string): void {
-				if (data) {
-					this._map._docPassword = data;
-					if (window.ThisIsAMobileApp) {
-						window.postMobileMessage('loadwithpassword password=' + data);
-					}
-					this._map.loadDocument();
-				} else if (passwordType === 'to-modify') {
-					this._map._docPassword = '';
-					this._map.loadDocument();
-				} else {
-					this._map.fire('postMessage', { msgId: 'UI_Cancel_Password' });
-					this._map.hideBusy();
+			(data: string): void => {
+				this._map._docPassword = data;
+				if (window.ThisIsAMobileApp) {
+					window.postMobileMessage('loadwithpassword password=' + data);
 				}
-			}.bind(this),
+				this._map.loadDocument();
+			},
 			true /* password input */,
+			giveUp,
 		);
 	}
 
@@ -2141,9 +2164,15 @@ class Socket {
 		// Never make the permission more permissive than it originally was.
 		if (!app.isReadOnly()) app.setPermission(perm);
 
-		if (this._map._docLayer) this._map.setPermission(app.file.permission);
+		this.applyFilePermission();
 
 		app.file.disableSidebar = app.isReadOnly();
+	}
+
+	// Give a loaded view the file permission. A loading view gets it with its status reply.
+	private applyFilePermission(): void {
+		if (this._map._docLayer && this._map._docLoaded)
+			this._map.setPermission(app.file.permission);
 	}
 
 	// 'filemode:' message.
@@ -2155,9 +2184,7 @@ class Socket {
 			app.setPermission('readonly');
 		}
 
-		if (this._map._docLayer) {
-			this._map.setPermission(app.file.permission);
-		}
+		this.applyFilePermission();
 
 		// Store the view mode extensions list from server configuration
 		if (json.viewModeExtensions) {

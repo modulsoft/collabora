@@ -2,9 +2,9 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-11 12:52+0200\n"
-"PO-Revision-Date: 2026-09-20 07:56+0000\n"
-"Last-Translator: Deleted User <nobody_12345@users.noreply.hosted.weblate.org>"
+"POT-Creation-Date: 2026-09-22 21:46+0200\n"
+"PO-Revision-Date: 2026-09-28 02:51+0000\n"
+"Last-Translator: QuietCedar47 <quietcedar47@users.noreply.hosted.weblate.org>"
 "\n"
 "Language-Team: Chinese (Simplified Han script) <https://hosted.weblate.org/"
 "projects/collabora-online/help/zh_Hans/>\n"
@@ -973,9 +973,8 @@ msgid ""
 "class=\"kbd--plus\" aria-hidden=\"true\">+</span><kbd>Arrow Key</kbd> "
 "inserts cell"
 msgstr ""
-"在插入模式下（3 秒内），方向键用于插入行/列，<kbd>Ctrl</kbd><span "
-"class=\"kbd--plus\" aria-hidden=\"true\">+</span><kbd>方向键</kbd> 用于插入单"
-"元格"
+"在插入模式下（3 秒内），方向键用于插入行/列，<kbd>Ctrl</kbd><span class=\"kbd"
+"--plus\" aria-hidden=\"true\">+</span><kbd>方向键</kbd> 用于插入单元格"
 
 #: html/cool-help.html%2Bdiv.div.div.table.tr.td:115-38
 msgid ""
@@ -1281,7 +1280,7 @@ msgstr ""
 
 #: html/cool-help.html%2Bdiv.div.div.table.tr.td:161-38
 msgid "Moves one screen page to the right."
-msgstr "向右移动一个屏幕页面。"
+msgstr "将屏幕页面向右移动。"
 
 #: html/cool-help.html%2Bdiv.div.div.table.tr.td:161-100
 msgid ""

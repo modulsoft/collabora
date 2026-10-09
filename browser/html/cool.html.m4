@@ -97,8 +97,10 @@ m4_dnl Add branding.css for mobile apps, or the placeholder for server processin
 m4_ifelse(MOBILEAPP, [true], [<link rel="stylesheet" href="m4_ifelse(IOSAPP, [true], [Branding/])branding.css" />],
   [<!--%BRANDING_CSS%--> <!-- add your logo here -->])
 m4_dnl
-m4_dnl Handle localization
-m4_ifelse(MOBILEAPP,[true],
+m4_dnl Handle localization. The Qt app page gets l10n-all.js (see below) instead
+m4_dnl of maps, whose entries only resolve when coolwsd serves them.
+m4_ifelse(QTAPP,[true],[],
+  MOBILEAPP,[true],
   [
    m4_ifelse(IOSAPP,[true],
      [],
@@ -173,6 +175,9 @@ m4_ifelse(MOBILEAPP, [true],
         </div>
       </nav>
 
+m4_ifelse(PREVIEW, [true],
+    [],
+    [
       <div id="toolbar-wrapper" role="toolbar" aria-orientation="horizontal">
           <div id="toolbar-row" class="toolbar-row">
             <div id="toolbar-logo"></div>
@@ -196,6 +201,8 @@ m4_ifelse(MOBILEAPP, [true],
       <input id="insertmultimedia" aria-hidden="true" type="file" accept="audio/*, video/*" tabindex="-1">
       <input id="selectbackground" aria-hidden="true" type="file" accept="image/*" tabindex="-1">
       <input id="comparedocuments" aria-hidden="true" type="file" accept="application/*" tabindex="-1">
+    ]
+)
     </dialog>
 
     <div id="main-document-content">
@@ -232,6 +239,9 @@ m4_ifelse(MOBILEAPP, [true],
       </div>
     </div>
 
+m4_ifelse(PREVIEW, [true],
+    [],
+    [
     <div id="spreadsheet-toolbar" class="hidden"></div>
 
     <div id="mobile-edit-button">
@@ -270,6 +280,8 @@ m4_ifelse(MOBILEAPP, [true],
         </div>
       </div>
     </dialog>
+]
+)
 
     <div id="snackbar-live-region" class="visuallyhidden" role="status" aria-live="polite" aria-atomic="true"></div>
 
@@ -296,6 +308,8 @@ m4_ifelse(MOBILEAPP, [true],
       data-access-token = "%ACCESS_TOKEN%"
       data-access-token-ttl = "%ACCESS_TOKEN_TTL%"
       data-ai-ethical-rating-message = "%AI_ETHICAL_RATING_MESSAGE%"
+      data-show-ai-sidebar = "%SHOW_AI_SIDEBAR%"
+      data-show-ai-notebookbar = "%SHOW_AI_NOTEBOOKBAR%"
       data-allow-update-notification = "%ENABLE_UPDATE_NOTIFICATION%"
       data-auto-show-feedback = "%AUTO_SHOW_FEEDBACK%"
       data-auto-show-welcome = "%AUTO_SHOW_WELCOME%"
@@ -303,6 +317,11 @@ m4_ifelse(MOBILEAPP, [true],
       data-check-file-info-override = "%CHECK_FILE_INFO_OVERRIDE%"
       data-cool-logging = "%BROWSER_LOGGING%"
       data-coolwsd-version = "%COOLWSD_VERSION%"
+      m4_ifelse(PREVIEW, [true],
+        [
+          data-cool-preview = "true"
+        ]
+      )
       data-copyright-year = _YEAR_
       data-deepl-enabled = "%DEEPL_ENABLED%"
       data-default-zoom = "%DEFAULT_ZOOM%"
@@ -325,7 +344,8 @@ m4_ifelse(MOBILEAPP, [true],
       data-out-of-focus-timeout-secs = "%OUT_OF_FOCUS_TIMEOUT_SECS%"
       data-post-message-origin-ext = "%POSTMESSAGE_ORIGIN%"
       data-protocol-debug = "%PROTOCOL_DEBUG%"
-      data-remote-documents-enabled = "%REMOTE_DOCUMENTS_ENABLED%"
+      data-relay-origin = "%RELAY_ORIGIN%"
+      data-remote-links-enabled = "%REMOTE_LINKS_ENABLED%"
       data-saved-ui-state = "%SAVED_UI_STATE%"
       data-service-root = "%SERVICE_ROOT%"
       data-smart-zoom = "%SMART_ZOOM%"
@@ -365,6 +385,7 @@ m4_ifelse(MOBILEAPP, [true],
 m4_ifelse(MOBILEAPP,[true],
   <!-- This is for a mobile app so the script files are in the same folder -->
   m4_ifelse(EMSCRIPTENAPP, [true], [<script src="emscripten-module.js" defer></script>])
+  m4_ifelse(QTAPP, [true], [<script src="l10n-all.js" defer></script>])
   m4_ifelse(BUNDLE, [], m4_foreachq([fileJS], [m4_include(COOL_JS.m4)], [<script src="fileJS" defer></script>]), [<script src="bundle.js" defer></script>]),
   m4_ifelse(BUNDLE, [], m4_foreachq([fileJS], [m4_include(COOL_JS.m4)],
         [<script src="%SERVICE_ROOT%/browser/%VERSION%/fileJS" defer></script>
